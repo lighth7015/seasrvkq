@@ -1,0 +1,23 @@
+#!/bin/sh
+
+# PROVIDE: %%OUTNAME%%
+# REQUIRE: DAEMON LOGIN inetd
+
+%%OUTNAME%%_enable="YES"
+%%OUTNAME%%_user="%%USER%%"
+
+. /etc/rc.subr
+
+name=%%OUTNAME%%
+rcvar=`set_rcvar`
+
+command=%%BINDIR%%/${name}
+stop_cmd="%%OUTNAME%%_stop"
+
+%%OUTNAME%%_stop() {
+	pkill -u `id -u $%%OUTNAME%%_user` $name
+}
+
+load_rc_config ${name} 
+
+run_rc_command "$1"
