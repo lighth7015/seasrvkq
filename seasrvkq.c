@@ -5,7 +5,7 @@
  * Covered by BSD license.
  *
  * Project started on 22.05.09 17:30 UTC+7.
- * Time spent: 46:12 before first run, 17:50 debugging.
+ * Time spent: 46:12 before first run, 24:50 debugging.
  * 
  * Could be used as an example of using many kqueue() features,
  * see comments in code marked KQ FEATURE.
@@ -25,6 +25,8 @@
  * server was used to write this server, but only as a hint (decompiler
  * didn't do everything, anyway). The main proto docs used are pictures
  * from Peek.
+ *
+ * In nomine Satani creo et destruo.
  */
 
 #include <sys/types.h>
@@ -630,6 +632,15 @@ try_write(int fd, struct outbufstq *q, int hint)
 
 /*
  * Setup writing event on a descriptor with provided output queue.
+ *
+ * NOTE: This should be implemented another way (flag in struct),
+ * or just not done at all - just call try_write() directly instead
+ * of this and handle errors at caller. But our goal is to demonstrate
+ * KQ FEATURE of disabled events, for other way see handling of archiver
+ * sock. But remember that handling errors at every caller of try_write()
+ * is far more complicated and potentially more error-prone than to defer
+ * this error checks and disconnects to top-level functions. So this is
+ * not just for demonstration.
  */
 void
 schedule_write(int fd, struct outbufstq *q)
@@ -672,7 +683,7 @@ schedule_write(int fd, struct outbufstq *q)
  * another complex protocol for that, so this is simple text line-oriented
  * (with byte count, though):
  *
- * A text line with case-insensitive firs field and integer second field,
+ * A text line with case-insensitive first field and integer second field,
  * number of other space-separated fields depends on command:
  *
  *     cmd bytecount may be other args till end of line\n
@@ -734,7 +745,7 @@ archive_msg(struct user_t *user, int dstid, struct dbuf *msgtext)
 	 */
 	if (archsock > 0) {
 		append_outbufq(&archq, textline, strlen(textline), msgtext);
-		schedule_write(archsock, &archq);
+		try_write(archsock, &archq, 0);
 	}
 }
 
@@ -774,7 +785,7 @@ parse_addr(struct sockaddr_storage *place, char *textaddr)
 		 * syslog() this error while openlog() has not yet been
 		 * called or caller may not want us to do syscalls.
 		 */
-		if (place && access(archpath, R_OK|W_OK)) {
+		if (place && access(textaddr, R_OK|W_OK)) {
 			syslog(LOG_ERR, "access(): %m");
 			return (0);
 		}
@@ -849,7 +860,7 @@ connect_archiver(int *sock, void *udata)
 	if (*sock > 0) {
 		/* check if connected */
 		len = sizeof(struct sockaddr_un);
-		ret = getpeername(*sock, (struct sockaddr*)&addr, &len);
+		ret = getpeername(*sock, (struct sockaddr*)addr, &len);
 		if ((ret == 0) || ((ret == -1) && (errno == ENOBUFS)))
 			return;	/* OK, sock is still connected or can't check */
 		if ((errno == ENOTSOCK) && (*sock == parse_addr(NULL, archpath)))
@@ -864,7 +875,7 @@ connect_archiver(int *sock, void *udata)
 	 * Get the socket address. Our caller should ensure that fd number is
 	 * passed only one time, on the start of the program, because we can't
 	 * do connects to descriptor numbers. Logging is also should be done
-	 * in another place because we are called by timer meny times between
+	 * in another place because we are called by timer many times between
 	 * address changes.
 	 */
 	if (!(fd = parse_addr(&archaddr, archpath)))
@@ -882,13 +893,23 @@ connect_archiver(int *sock, void *udata)
 	/* Error here is not critical - may be a Unix socket. */
 	setsockopt(*sock, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(int));
 
-	/* register events on this sock before connecting */
-	EV_SET(&kev, *sock, EVFILT_WRITE, EV_ADD|EV_ONESHOT, 0, 0, udata);
+	/*
+	 * Register events on this sock before connecting.
+	 *
+	 * KQ FEATURE: We use EV_CLEAR here so that event is kept
+	 * permanently in the kernel but not returned every time as it
+	 * would be in usual case (have space in socket buffer). Instead,
+	 * only changes in write socket buffer will be reported, for example,
+	 * when peer reads something or when error is encountered. So we,
+	 * as opposed to EV_DISABLE method, do direct writes to socket without
+	 * waiting for availability event.
+	 */
+	EV_SET(&kev, *sock, EVFILT_WRITE, EV_ADD|EV_CLEAR, 0, 0, udata);
 	if (kevent(kq, &kev, 1, NULL, 0, NULL) < 0)
 		goto err;
 
 	/* perform connect */
-	ret = connect(*sock, (struct sockaddr*)&addr, addr->sa_len);
+	ret = connect(*sock, (struct sockaddr*)addr, addr->sa_len);
 	if ((ret == -1) && (errno != EINPROGRESS)) {
 		syslog(LOG_ERR, "connect(): %m");
 		goto err;
@@ -902,37 +923,47 @@ err:
 }
 
 /*
- * Close archiver socket and drain it's queue.
+ * Close socket and drain it's queue.
  */
 void
-disconnect_archiver(void)
+disconnect_sock(int fd, struct outbufstq *outq)
 {
 	struct outbuf *obuf;
 
-	close(archsock);
-	archsock = -1;
+	ASSERT((fd > 0) && (outq != NULL));
+	close(fd);
 
-	/*
-	 * In any case we don't know if archiver has read next complete
-	 * command, we also can't distinguish command bounds in our queue. So
-	 * we must drain it completely, may be loosing some data (but archiver
-	 * is optional facility anyway).
-	 *
-	 * XXX Note that data is added again to archiver's queue when
-	 * connection attempt begins, that is, before it has finished and could
-	 * be read, but if this attempt was unsuccessful, queue is cleared
-	 * again. This doesn't allow to keep e.g. hours or days of archive data
-	 * between connections, but that could be seen as excessive memory
-	 * consumption prevention (effectively leak from admin's viewpoint if
-	 * archiver will never connect).
-	 */
-	while (!STAILQ_EMPTY(&archq)) {
-		obuf = STAILQ_FIRST(&archq);
-		STAILQ_REMOVE_HEAD(&archq, obq);
+	while (!STAILQ_EMPTY(outq)) {
+		obuf = STAILQ_FIRST(outq);
+		STAILQ_REMOVE_HEAD(outq, obq);
 		if (obuf->data != NULL)
 			free_dbuf(obuf->data);
 		free(obuf);
 	}
+}
+
+/*
+ * Close archiver socket and drain it's queue.
+ *
+ * In any case we don't know if archiver has read next complete
+ * command, we also can't distinguish command bounds in our queue. So
+ * we must drain it completely, may be loosing some data (but archiver
+ * is optional facility anyway).
+ *
+ * XXX Note that data is added again to archiver's queue when
+ * connection attempt begins, that is, before it has finished and could
+ * be read, but if this attempt was unsuccessful, queue is cleared
+ * again. This doesn't allow to keep e.g. hours or days of archive data
+ * between connections, but that could be seen as excessive memory
+ * consumption prevention (effectively leak from admin's viewpoint if
+ * archiver will never connect).
+ */
+void
+disconnect_archiver(void)
+{
+	if (archsock > 0)
+		disconnect_sock(archsock, &archq);
+	archsock = -1;
 }
 
 /*
@@ -996,16 +1027,9 @@ kill_user(struct user_t *user, int sockerr, char *reason)
 	}
 
 	/* Free resources. */
-	close(user->fd);
 	if (user->inbuf != NULL)
 		free(user->inbuf);
-	while (!STAILQ_EMPTY(&user->outbufq)) {
-		obuf = STAILQ_FIRST(&user->outbufq);
-		STAILQ_REMOVE_HEAD(&user->outbufq, obq);
-		if (obuf->data != NULL)
-			free_dbuf(obuf->data);
-		free(obuf);
-	}
+	disconnect_sock(user->fd, &user->outbufq);
 
 	/* Finally free structure itself and destroy it for safety. */
 	bzero(user, sizeof(struct user_t));
@@ -1280,7 +1304,7 @@ admin_command(int signo)
 				append_outbufq(&archq, curuser->userinfo, curuser->infolen, NULL);
 			}
 		/* TODO: if (debug) dump global variables */
-		schedule_write(archsock, &archq);
+		try_write(archsock, &archq, 0);
 		break;
 	case SIGWINCH:	/* change alternative address */
 		if (ipaddr == INADDR_NONE)
@@ -1886,7 +1910,7 @@ retry:
 	}
 	bzero(user, sizeof(struct user_t));
 	user->fd = fd;
-	memcpy(&user->addr, &cli_addr, sizeof(struct in_addr));
+	memcpy(&user->addr, &cli_addr, sizeof(struct sockaddr_in));
 
 	/* We can't work without textual version of IP address. */
 	if (!inet_ntop(AF_INET, &cli_addr.sin_addr, user->txtaddr, sizeof(user->txtaddr))) {
@@ -1985,20 +2009,26 @@ read_header:
 	 * Current state: reading header.
 	 */
 	ret = read(fd, buf, 4);
-	if (((ret < 0) && (errno == EINTR)) || ((ret > 0) && (ret < 4)))
-		ret = read(fd, &buf[ret], (ret > 0) ? 4-ret : 4);	/* Interrupted by signal, retry. */
-	if (ret < 0) {
-		kill_user(user, errno, NULL);
-		return;
-	}
+	if (ret < 0)
+		if (errno == EINTR)
+			goto read_header;	/* Interrupted by signal, retry. */
+		else {
+			kill_user(user, errno, NULL);
+			return;
+		}
+	else if ((ret > 0) && (ret < 4))	/* Should never occur. */
+		syslog(LOG_EMERG, "handle_read(): fd=%d: read() impossibly returned <4 (%d) bytes of header",
+				fd, ret);
 
 	/* Successful read, parse. */
 	user->cmdlen = ((buf[0] << 16) | (buf[1] << 8) | (buf[2])) & 0xffffff;
 	user->cmdbyte = buf[3];
 	user->readlen = 1;	/* off by one to simplify math with read() */
 	sizehint -= 4;		/* exclude header */
+	syslog(LOG_DEBUG, "handle_read(%d): received header with cmd #%hhu, starting to read %d body bytes",
+			fd, user->cmdbyte, user->cmdlen);
 	if (user->cmdlen > 65535)
-		syslog(LOG_WARNING, "Abnormaly big command length %d for command %hhu from %s:%hu",
+		syslog(LOG_WARNING, "Abnormally big command length %d for command %hhu from %s:%hu",
 				user->cmdlen, user->cmdbyte,
 				user->txtaddr, ntohs(user->addr.sin_port));
 	if (strict && (user->cmdlen > 65536 + 7)) {
@@ -2140,7 +2170,7 @@ handle_write(int fd, struct outbufstq *obufq, u_short kqflags, u_int sockerr, in
 		goto write_err;
 	}
 	/* Successful otherwise. */
-	if (STAILQ_EMPTY(obufq)) {
+	if (STAILQ_EMPTY(obufq) && (fd != archsock)) {
 		/* Deschedule writes. */
 		EV_SET(&kev, fd, EVFILT_WRITE, EV_DISABLE, 0, 0, obufq);
 		if ((kevent(kq, &kev, 1, NULL, 0, NULL) < 0) && (errno != EINTR))
@@ -2159,8 +2189,6 @@ write_err:
 		return;
 	}
 
-	disconnect_archiver();
-
 	/*
 	 * Was it closed by error? If so, wait a little until timer will
 	 * trigger next time, or try to reconnect immediately otherwise.
@@ -2168,10 +2196,12 @@ write_err:
 	if (sockerr) {
 		errno = sockerr;
 		syslog(LOG_ERR, "Connection to archiver lost: %m");
+		disconnect_archiver();
 	} else {
 		syslog(LOG_INFO, "Archiver closed connection (%s)",
 				STAILQ_EMPTY(obufq) ? "clean" :
 				"our buffer still has data");
+		disconnect_archiver();
 		connect_archiver(&archsock, obufq);
 	}
 }
@@ -2441,6 +2471,11 @@ main(int argc, char *argv[])
 		connect_archiver(&archsock, &archq);
 	else if (archsock == 0)	/* avoid closing fd 0 by timer later */
 		archsock = -1;
+	else if (archsock > 0) {/* already opened, monitor writes */	
+		EV_SET(&kev[0], archsock, EVFILT_WRITE, EV_ADD|EV_CLEAR, 0, 0, &archq);
+		if ((kevent(kq, kev, 1, NULL, 0, NULL) < 0))
+			syslog(LOG_ERR, "adding archiver write kevent(): %m");
+	}
 
 	/*
 	 * KQ FEATURE: We could process signals with kqueue(), too (see
