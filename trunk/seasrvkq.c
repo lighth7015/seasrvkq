@@ -5,7 +5,7 @@
  * Covered by BSD license.
  *
  * Project started on 22.05.09 17:30 UTC+7.
- * Time spent: 46:12 before first run, 24:50 debugging.
+ * Time spent: 46:12 before first run, 27:15 debugging.
  * 
  * Could be used as an example of using many kqueue() features,
  * see comments in code marked KQ FEATURE.
@@ -34,6 +34,7 @@
 #include <sysexits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
@@ -843,45 +844,33 @@ inet4:
 
 /* 
  * Do a nonblocking connect on passed socket variable with setting
- * user data for keeping in kevent(). This function is called on timer
+ * user data for keeping in kevent(). This function may be called on timer
  * event and must support doing nothing with already connected descriptor.
  *
- * XXX TODO: this should be generic socket function without archiver specifics
- * to allow generic connects (e.g. to other IM systems gateways).
+ * This is a generic socket function, caller must provide us with already
+ * parsed struct sockaddr, so this could be used for doing generic connects
+ * (e.g. to archiver or other IM systems gateways).
  */
 void
-connect_archiver(int *sock, void *udata)
+connect_sock(int *sock, void *udata, struct sockaddr *addr)
 {
-	struct sockaddr *addr = (struct sockaddr*)&archaddr; /* make compiler happy */
 	struct kevent kev;
 	int yes = 1;
-	int fd, ret, len;
+	int ret, len;
 
 	if (*sock > 0) {
 		/* check if connected */
 		len = sizeof(struct sockaddr_un);
-		ret = getpeername(*sock, (struct sockaddr*)addr, &len);
+		ret = getpeername(*sock, addr, &len);
 		if ((ret == 0) || ((ret == -1) && (errno == ENOBUFS)))
 			return;	/* OK, sock is still connected or can't check */
-		if ((errno == ENOTSOCK) && (*sock == parse_addr(NULL, archpath)))
+		if ((errno == ENOTSOCK)/*&& (*sock == parse_addr(NULL, archpath))*/)
 			return;	/* OK, that's file or pipe on expected fd number */
 		/* connection is absent, close and retry connect */
 		if (errno != EBADF)
 			close(*sock);
 		*sock = -1;
 	}
-
-	/*
-	 * Get the socket address. Our caller should ensure that fd number is
-	 * passed only one time, on the start of the program, because we can't
-	 * do connects to descriptor numbers. Logging is also should be done
-	 * in another place because we are called by timer many times between
-	 * address changes.
-	 */
-	if (!(fd = parse_addr(&archaddr, archpath)))
-		goto err;
-	if (fd > 0)
-		return;
 
 	/* prepare to connection */
 	if ((*sock = socket(addr->sa_family, SOCK_STREAM, 0)) == -1)
@@ -909,7 +898,7 @@ connect_archiver(int *sock, void *udata)
 		goto err;
 
 	/* perform connect */
-	ret = connect(*sock, (struct sockaddr*)addr, addr->sa_len);
+	ret = connect(*sock, addr, addr->sa_len);
 	if ((ret == -1) && (errno != EINPROGRESS)) {
 		syslog(LOG_ERR, "connect(): %m");
 		goto err;
@@ -942,28 +931,42 @@ disconnect_sock(int fd, struct outbufstq *outq)
 	}
 }
 
-/*
- * Close archiver socket and drain it's queue.
- *
- * In any case we don't know if archiver has read next complete
- * command, we also can't distinguish command bounds in our queue. So
- * we must drain it completely, may be loosing some data (but archiver
- * is optional facility anyway).
- *
- * XXX Note that data is added again to archiver's queue when
- * connection attempt begins, that is, before it has finished and could
- * be read, but if this attempt was unsuccessful, queue is cleared
- * again. This doesn't allow to keep e.g. hours or days of archive data
- * between connections, but that could be seen as excessive memory
- * consumption prevention (effectively leak from admin's viewpoint if
- * archiver will never connect).
- */
 void
-disconnect_archiver(void)
+reconnect_archiver(bool disconnect_and_reparse)
 {
-	if (archsock > 0)
+	/*
+	 * Close archiver socket and drain it's queue.
+	 *
+	 * In any case we don't know if archiver has read next complete
+	 * command, we also can't distinguish command bounds in our queue. So
+	 * we must drain it completely, may be loosing some data (but archiver
+	 * is optional facility anyway).
+	 *
+	 * XXX Note that data is added again to archiver's queue when
+	 * connection attempt begins, that is, before it has finished and could
+	 * be read, but if this attempt was unsuccessful, queue is cleared
+	 * again. This doesn't allow to keep e.g. hours or days of archive data
+	 * between connections, but that could be seen as excessive memory
+	 * consumption prevention (effectively leak from admin's viewpoint if
+	 * archiver will never connect).
+	 */
+	if ((archsock > 0) && disconnect_and_reparse)
 		disconnect_sock(archsock, &archq);
 	archsock = -1;
+
+	/*
+	 * Get the socket address. Our caller may have already parsed address
+	 * to struct sockaddr, don't redo if so; fd number is allowed to be
+	 * passed only one time, on the start of the program, because we can't
+	 * do connects to descriptor numbers. Logging is also should be done
+	 * in another place because we are called by timer many times between
+	 * address changes.
+	 */
+	if (disconnect_and_reparse)
+		if (parse_addr(&archaddr, archpath) >= 0)
+			return;
+
+	connect_sock(&archsock, &archq, (struct sockaddr*)&archaddr);
 }
 
 /*
@@ -981,7 +984,6 @@ kill_user(struct user_t *user, int sockerr, char *reason)
 	char buf[3];
 	struct flooder *cf, *tf;
 	struct user_t *curuser;
-	struct outbuf *obuf;
 
 	ASSERT(user != NULL);
 
@@ -1270,8 +1272,7 @@ admin_command(int signo)
 		memcpy(&archaddr, &addr_stor, sizeof(struct sockaddr_storage));
 		if (!strncmp(admcmd, archpath, sizeof(archpath))) {
 			syslog(LOG_NOTICE, "repeated SIGHUP, forcing reconnect to archiver");
-			disconnect_archiver();
-			connect_archiver(&archsock, &archq);
+			reconnect_archiver(true);
 		} else {
 			syslog(LOG_INFO, "setting archiver path to: %s", admcmd);
 			strlcpy(archpath, admcmd, sizeof(archpath));
@@ -2196,13 +2197,43 @@ write_err:
 	if (sockerr) {
 		errno = sockerr;
 		syslog(LOG_ERR, "Connection to archiver lost: %m");
-		disconnect_archiver();
+		disconnect_sock(archsock, &archq);
+		archsock = -1;
 	} else {
 		syslog(LOG_INFO, "Archiver closed connection (%s)",
 				STAILQ_EMPTY(obufq) ? "clean" :
 				"our buffer still has data");
-		disconnect_archiver();
-		connect_archiver(&archsock, obufq);
+		reconnect_archiver(true);
+	}
+}
+
+/*
+ * Triggers every ARCH_TIMEOUT seconds - either ping existing connection
+ * or initiate new one.
+ */
+void
+handle_pingtimer(void *udata)
+{
+	time_t curtime = time(NULL);
+	char textline[MAXPATHLEN];
+
+	/*
+	 * XXX That should be KQ FEATURE of using passed udata, but
+	 * this program don't really needs it. In addition, this whole
+	 * archiver-handling funcs system sucks :( It is not so generic
+	 * as I want it to be, but I have no time to rewrite (it works),
+	 * so let it it be SO stupid way of using passed udata variable...
+	 */
+	ASSERT(udata == &archq);
+
+	textline[0] = '\0';
+	snprintf(textline, MAXPATHLEN, "TIME 0 %d\n", curtime);
+
+	if (archsock > 0) {
+		append_outbufq(&archq, textline, strlen(textline), NULL);
+		try_write(archsock, &archq, 0);
+	} else {
+		reconnect_archiver(false);
 	}
 }
 
@@ -2248,7 +2279,7 @@ event_loop(void)
 		 * is the only one, in addition to main SIGALRM timer, so we don't care
 		 * about timer number.
 		 */
-		connect_archiver(&archsock, kev.udata);
+		handle_pingtimer(kev.udata);
 		break;
 	case EVFILT_SIGNAL:
 		/*
@@ -2365,7 +2396,8 @@ main(int argc, char *argv[])
 		case 'f':
 			flood_threshold = atoi(optarg) < 3 ? 3 : atoi(optarg);
 		case 't':
-			ban_timeout = (atoi(optarg) < flood_threshold * DEF_MAXPENALTY) ? flood_threshold * DEF_MAXPENALTY : atoi(optarg);
+			ban_timeout = (atoi(optarg) < flood_threshold * DEF_MAXPENALTY) ?
+				flood_threshold * DEF_MAXPENALTY : atoi(optarg);
 			break;
 		case 'q':
 			quiet = 1;
@@ -2456,7 +2488,7 @@ main(int argc, char *argv[])
 	 * KQ FEATURE: We use a timer (number 0) to schedule (in milliseconds)
 	 * a periodic connection attempt timer. We don't do anything on error
 	 * because archiver is optional facility. The timer is periodic so the
-	 * connect_archiver() will check itself should it do the work or not.
+	 * reconnect_archiver() will check itself should it do the work or not.
 	 */
 	EV_SET(&kev[0], 0, EVFILT_TIMER, EV_ADD, 0, ARCH_TIMEOUT*1000, &archq);
 	if ((kevent(kq, kev, 1, NULL, 0, NULL) < 0))
@@ -2466,9 +2498,9 @@ main(int argc, char *argv[])
 	 * Connect archiver first time before clients. If it is descriptor
 	 * number instead of address, use it one, and only one, time.
 	 */
-	archsock = parse_addr(NULL, archpath);
+	archsock = parse_addr(&archaddr, archpath);
 	if ((strlen(archpath) > 0) && (archsock < 0))
-		connect_archiver(&archsock, &archq);
+		connect_sock(&archsock, &archq, (struct sockaddr*)&archaddr);
 	else if (archsock == 0)	/* avoid closing fd 0 by timer later */
 		archsock = -1;
 	else if (archsock > 0) {/* already opened, monitor writes */	
