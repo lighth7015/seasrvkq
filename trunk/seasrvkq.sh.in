@@ -3,7 +3,14 @@
 # PROVIDE: %%OUTNAME%%
 # REQUIRE: DAEMON LOGIN inetd
 
-%%OUTNAME%%_enable="YES"
+# Add the following line to your /etc/rc.conf[.local] to enable %%OUTNAME%%:
+#
+#     %%OUTNAME%%_enable="YES"
+#
+# You can specify parameters in %%OUTNAME%%_flags, see output of %%OUTNAME%% -h
+# for more details.
+
+%%OUTNAME%%_enable=${%%OUTNAME%%_enable:="NO"}
 %%OUTNAME%%_user="%%USER%%"
 
 . /etc/rc.subr
