@@ -56,10 +56,10 @@
 
 /* Some macros. */
 #define ASSERT(e) ( (e) ? (void)0 : \
-	(syslog(LOG_ERR, "Abort: assertion failed in function %s at line %d of file %s", \
+	(syslog(LOG_CRIT, "Abort: assertion failed in function %s at line %d of file %s", \
 		   __func__, __LINE__, __FILE__), abort()))
 #define ENOMEM_EXIT { \
-		syslog(LOG_ERR, "Not enough memory! Sorry, but daemon can't continue."); \
+		syslog(LOG_CRIT, "Not enough memory! Sorry, but daemon can't continue."); \
 		exit(EX_OSERR);								 \
 	}
 #define roundup2power2(x) ((1 << (fls(x) - 1) == x) ? x: 1 << ((fls(x) - 1) + 1))
@@ -230,11 +230,11 @@ sock_nonblock(int sock)
 
 	/* Non blocking mode */
 	if ((flags = fcntl(sock, F_GETFL, 0)) < 0) {
-		syslog(LOG_ERR, "sock_nonblock(): fcntl(%d, F_GETFL): %m", sock);
+		syslog(LOG_ERR, "sock_nonblock: fcntl(%d, F_GETFL): %m", sock);
 		return (-1);
 	}
 	if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) {
-		syslog(LOG_ERR, "sock_nonblock(): fcntl(%d, F_SETFL): %m", sock);
+		syslog(LOG_ERR, "sock_nonblock: fcntl(%d, F_SETFL): %m", sock);
 		return (-1);
 	}
 
@@ -661,7 +661,7 @@ schedule_write(int fd, struct outbufstq *q)
 	 */
 	EV_SET(&kev, fd, EVFILT_WRITE, EV_ENABLE, 0, 0, q);
 	if ((kevent(kq, &kev, 1, NULL, 0, NULL) < 0) && (errno != EINTR))
-		syslog(LOG_ERR, "schedule_write(): enabling kevent(): %m");
+		syslog(LOG_ERR, "schedule_write: enabling kevent: %m");
 }
 
 /*
@@ -711,7 +711,7 @@ schedule_write(int fd, struct outbufstq *q)
  *
  * Format:
  * 
- *     MSG count src_id user_txtIP dst_id unixtime username[machinename]
+ *     MSG count src_id user_txtIP dst_id unixtime username[machinename]\n
  *
  * Example message from user John at machine FOOBAR (id=4) to all users
  * (id=0) at 2009-02-13 23:31:30 UTC, then message from user with spaces
@@ -787,7 +787,7 @@ parse_addr(struct sockaddr_storage *place, char *textaddr)
 		 * called or caller may not want us to do syscalls.
 		 */
 		if (place && access(textaddr, R_OK|W_OK)) {
-			syslog(LOG_ERR, "access(): %m");
+			syslog(LOG_ERR, "access: %m");
 			return (0);
 		}
 
@@ -900,7 +900,7 @@ connect_sock(int *sock, void *udata, struct sockaddr *addr)
 	/* perform connect */
 	ret = connect(*sock, addr, addr->sa_len);
 	if ((ret == -1) && (errno != EINPROGRESS)) {
-		syslog(LOG_ERR, "connect(): %m");
+		syslog(LOG_ERR, "connect: %m");
 		goto err;
 	}
 
@@ -1020,11 +1020,11 @@ kill_user(struct user_t *user, int sockerr, char *reason)
 
 	/* Perform logging, if caller wishes so. */
 	if (reason)
-		syslog(LOG_INFO, "Disconnected client id=%d %s[%s]: %s",
+		syslog(LOG_INFO, "client id=%d %s[%s] disconnected: %s",
 			user->fd, user->username, user->compname, reason);
 	else if (sockerr) {
 		errno = sockerr;
-		syslog(LOG_INFO, "Disconnected client id=%d %s[%s]: %m",
+		syslog(LOG_INFO, "client id=%d %s[%s] disconnected: %m",
 			user->fd, user->username, user->compname);
 	}
 
@@ -1063,7 +1063,7 @@ process_timer(void)
 		if ((ret = kevent(kq, &kev, 1, NULL, 0, NULL)) < 0) {
 			if (errno == EINTR)
 				continue;	/* better luck on next pass */
-			syslog(LOG_ERR, "process_timer(): adding kevent(): %m");
+			syslog(LOG_ERR, "process_timer: adding kevent: %m");
 
 			/*
 			 * We could handle ENOMEM as transient error,
@@ -1216,7 +1216,7 @@ admin_command(int signo)
 	bzero(&admcmd, sizeof(admcmd));
 	cmdlen = readlink(linkpath, admcmd, MAXPATHLEN);
 	if (cmdlen <= 0) {
-		syslog(LOG_ERR, "readlink(): %m");
+		syslog(LOG_ERR, "readlink: %m");
 		return;
 	}
 
@@ -1309,7 +1309,7 @@ admin_command(int signo)
 		break;
 	case SIGWINCH:	/* change alternative address */
 		if (ipaddr == INADDR_NONE)
-			syslog(LOG_ERR, "admin_command(): IPv4 address expected instead of %s", admcmd);
+			syslog(LOG_ERR, "admin_command: IPv4 address expected instead of %s", admcmd);
 		else {
 			syslog(LOG_INFO, "sending new secondary server IP address (%s) to all clients", admcmd);
 			buf[0] = SEA_S2C_CHGALTSRVIP;
@@ -1321,7 +1321,7 @@ admin_command(int signo)
 		}
 		break;
 	default:
-		syslog(LOG_ERR, "admin_command(): unknown signal %d", signo);
+		syslog(LOG_ERR, "admin_command: unknown signal %d", signo);
 	}
 }
 
@@ -1358,7 +1358,7 @@ escape_name(unsigned char *name, int len)
 #define CHECK_LENGTH(c) do { 						\
 	if (user->cmdlen > (c))	{					\
 		syslog(strict ? LOG_ERR : LOG_WARNING,			\
-			"%s(): client id=%d has %d trailing bytes in command #%hhu", \
+			"%s: client id=%d has %d trailing bytes in command #%hhu", \
 			__func__, user->fd, user->cmdlen - (c), user->cmdbyte);	\
 		if (strict)						\
 			goto invalid_format;				\
@@ -1379,7 +1379,7 @@ process_usercomp(struct user_t *user)
 	ASSERT(user != NULL);
 
 	if (user->cmdbyte != SEA_C2S_USERCOMP) {
-		syslog(LOG_ERR, "process_usercomp(): first command from client id=%d was %hhu, not #1",
+		syslog(LOG_ERR, "process_usercomp: first command from client id=%d was %hhu, not #1",
 				user->fd, user->cmdbyte);
 		/*
 		 * SEA SHIT: And original server didn't kill such user
@@ -1490,10 +1490,12 @@ process_usercomp(struct user_t *user)
 	buf[1] = 0;
 	append_outbufq(&user->outbufq, buf, 2, NULL);
 
+	syslog(LOG_INFO, "client id=%d %s[%s] logged in from %s:%hu",
+			user->fd, user->username, user->compname, user->txtaddr, ntohs(user->addr.sin_port));
 	return (0);
 
 invalid_format:
-	syslog(LOG_ERR, "process_usercomp(): client id=%d from %s login failure: protocol format error",
+	syslog(LOG_ERR, "process_usercomp: client id=%d from %s login failure: protocol format error",
 			user->fd, user->txtaddr);
 	return (-1);
 }
@@ -1510,7 +1512,7 @@ process_command(struct user_t *user)
 	struct dbuf *bcastbuf;
 
 	ASSERT(user != NULL);
-	syslog(LOG_DEBUG, "process_command(): debug fd=%d: entering with cmd #%d and cmdlen=%d",
+	syslog(LOG_DEBUG, "process_command: debug fd=%d: entering with cmd #%d and cmdlen=%d",
 			user->fd, user->cmdbyte, user->cmdlen);
 
 	/*
@@ -1520,7 +1522,7 @@ process_command(struct user_t *user)
 	if ((user->unamelen == 0) && (user->cnamelen == 0))
 		return process_usercomp(user);
 	else if (user->cmdbyte == SEA_C2S_USERCOMP) {
-		syslog(LOG_ERR, "process_command(): client id=%d issues #1 while already logged in as %s[%s]",
+		syslog(LOG_ERR, "process_command: client id=%d issues #1 while already logged in as %s[%s]",
 				user->fd, user->username, user->compname);
 		/* Original server ignores it, let for us to do it too. */
 		return (0);
@@ -1578,8 +1580,9 @@ process_command(struct user_t *user)
 		memcpy(&user->userinfo[0], &user->inbuf[7], user->infolen);
 		user->version = user->inbuf[user->infolen + 7];
 		CHECK_LENGTH(user->infolen + 9);
-		syslog(LOG_DEBUG, "process_command(): debug fd=%d: userinfo set to faculty=%hhu room=%s version=%hhu and %d info bytes",
-				user->fd, user->faculty, user->room, user->version, user->infolen);
+		syslog(LOG_INFO, "client id=%d %s[%s]: userinfo set to faculty=%hhu room=%s version=%hhu and %d info bytes",
+				user->fd, user->username, user->compname, user->faculty, user->room, user->version,
+				user->infolen);
 		/*
 		 * Now, as this client supports SEA_C2S_USERINFO command, he
 		 * also supports being away, so we must inform which users
@@ -1649,12 +1652,12 @@ process_command(struct user_t *user)
 		memcpy(&userid, user->inbuf, 2);
 		userid = ntohs(userid);
 		if (msglen == 0) {
-			syslog(LOG_WARNING, "process_command(): ignoring zero-length message from client id=%d %s[%s] to id=%hu",
+			syslog(LOG_WARNING, "ignoring zero-length message from client id=%d %s[%s] to id=%hu",
 					user->fd, user->username, user->compname, userid);
 			break;
 		}
 		user->penalty_timer += 8;	/* not so strict flood control */
-		syslog(LOG_INFO, "process_command(): message from client id=%d %s[%s] to id=%hu of %hu bytes",
+		syslog(LOG_INFO, "message from client id=%d %s[%s] to id=%hu (%hu bytes)",
 				user->fd, user->username, user->compname, userid, msglen);
 
 		/*
@@ -1708,7 +1711,7 @@ process_command(struct user_t *user)
 		buf[0] = SEA_S2C_PONG;
 		append_outbufq(&user->outbufq, buf, 1, NULL);
 		schedule_write(user->fd, &user->outbufq);
-		syslog(LOG_DEBUG, "process_command(): debug fd=%d: Ping? Pong!", user->fd);
+		syslog(LOG_DEBUG, "process_command: debug fd=%d: Ping? Pong!", user->fd);
 		break;
 	case SEA_C2S_USERINFOREQ:	/* 5 */
 		user->penalty_timer++;
@@ -1719,7 +1722,7 @@ process_command(struct user_t *user)
 		memcpy(&userid, user->inbuf, 2);
 		userid = ntohs(userid);
 		curuser = fd2user(userid);
-		syslog(LOG_DEBUG, "process_command(): debug fd=%d: userinfo req about %d", user->fd, userid);
+		syslog(LOG_DEBUG, "process_command: debug fd=%d: userinfo req about %d", user->fd, userid);
 		if (curuser == NULL)
 			break;	/* Not found */
 		buf[0] = SEA_S2C_USERINFO;
@@ -1744,7 +1747,7 @@ process_command(struct user_t *user)
 		memcpy(&userid, user->inbuf, 2);
 		userid = ntohs(userid);
 		curuser = fd2user(userid);
-		syslog(LOG_DEBUG, "process_command(): debug fd=%d: chat %s to %d", user->fd,
+		syslog(LOG_DEBUG, "process_command: debug fd=%d: chat %s to %d", user->fd,
 				(user->cmdbyte == SEA_C2S_CHATREQ) ? "req/text" : "cancel", userid);
 		if (curuser == NULL)
 			break;	/* Not found */
@@ -1770,7 +1773,7 @@ process_command(struct user_t *user)
 		append_outbufq(&user->outbufq, buf, 2, NULL);
 		append_outbufq(&user->outbufq, archlink, strlen(archlink), NULL);
 		schedule_write(user->fd, &user->outbufq);
-		syslog(LOG_DEBUG, "process_command(): debug fd=%d: archlink req, sending %hhu bytes", user->fd, buf[0]);
+		syslog(LOG_DEBUG, "process_command: debug fd=%d: archlink req, sending %hhu bytes", user->fd, buf[0]);
 		break;
 	case SEA_C2S_MUTE:		/* 10 */
 		if (user->cmdlen < 3)
@@ -1780,7 +1783,7 @@ process_command(struct user_t *user)
 		memcpy(&userid, user->inbuf, 2);
 		userid = ntohs(userid);
 		curuser = fd2user(userid);
-		syslog(LOG_DEBUG, "process_command(): debug fd=%d: mute to %d", user->fd, userid);
+		syslog(LOG_DEBUG, "process_command: debug fd=%d: mute to %d", user->fd, userid);
 		if (curuser == NULL)
 			break;	/* Not found */
 		if (curuser->version < 96)
@@ -1795,7 +1798,7 @@ process_command(struct user_t *user)
 	case SEA_C2S_UNAWAY:		/* 12 */
 		CHECK_LENGTH(1);
 		user->is_away = (user->cmdbyte == SEA_C2S_AWAY) ? 1 : 0;
-		syslog(LOG_DEBUG, "process_command(): debug fd=%d: setting is_away=%d", user->fd, user->is_away);
+		syslog(LOG_DEBUG, "process_command: debug fd=%d: setting is_away=%d", user->fd, user->is_away);
 		buf[0] = user->cmdbyte;
 		userid = htons((uint16_t)(user->fd & 0xffff));
 		memcpy(&buf[1], &userid, 2);
@@ -1821,7 +1824,7 @@ process_command(struct user_t *user)
 		escape_name(user->username, user->unamelen);
 		if (user->username[0] == 32)
 			user->username[0] = '_';
-		syslog(LOG_INFO, "process_command(): client id=%d %s[%s] changes name to %s",
+		syslog(LOG_INFO, "client id=%d %s[%s] changes name to %s",
 				user->fd, buf, user->compname, user->username);
 		/*
 		 * Now broadcast changed username - as this could be big but
@@ -1843,17 +1846,17 @@ process_command(struct user_t *user)
 	case SEA_C2S_PRINTER:		/* 15 */
 		CHECK_LENGTH(1);
 		user->is_printer = 1;
-		syslog(LOG_INFO, "process_command(): client id=%d %s[%s] joins printers group",
+		syslog(LOG_INFO, "client id=%d %s[%s] joins printers group",
 				user->fd, user->username, user->compname);
 		break;
 	case SEA_C2S_UNPRINTER:		/* 16 */
 		CHECK_LENGTH(1);
 		user->is_printer = 0;
-		syslog(LOG_INFO, "process_command(): client id=%d %s[%s] leaves printers group",
+		syslog(LOG_INFO, "client id=%d %s[%s] leaves printers group",
 				user->fd, user->username, user->compname);
 		break;
 	default:
-		syslog(LOG_WARNING, "process_command(): unknown command code #%hhu from client id=%d %s[%s]",
+		syslog(LOG_WARNING, "process_command: unknown command code #%hhu from client id=%d %s[%s]",
 				user->cmdbyte, user->fd, user->username, user->compname);
 	}
 #undef CHECK_LENGTH
@@ -1861,7 +1864,7 @@ process_command(struct user_t *user)
 	return (0);
 
 invalid_format:
-	syslog(LOG_ERR, "process_command(): killing client id=%d %s[%s]: protocol format error (command #%hhu, length %d)",
+	syslog(LOG_ERR, "process_command: killing client id=%d %s[%s]: protocol format error (command #%hhu, length %d)",
 			user->fd, user->username, user->compname, user->cmdbyte, user->cmdlen);
 	return (-1);
 }
@@ -1881,14 +1884,14 @@ accept_client(void)
 
 retry:
 	fd = accept(servsock, (struct sockaddr *)&cli_addr, &clilen);
-	syslog(LOG_DEBUG, "entering accept_client(): accept() returned fd=%d (%m)", fd);
+	syslog(LOG_DEBUG, "entering accept_client: accept() returned fd=%d (%m)", fd);
 	if ((fd < 0) && (errno == EINTR))
 		goto retry;
 	if (fd <= 0)	/* XXX Our architecture and protocol prohibits id=0. */
 		return;
 	if ((sock_nonblock(fd) == -1) ||
 	    (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(int)) == -1)) {
-		syslog(LOG_ERR, "accept_client(): sock_nonblock()/setsockopt(): %m");
+		syslog(LOG_ERR, "accept_client: sock_nonblock()/setsockopt(): %m");
 		close(fd);
 		return;
 	}
@@ -1898,14 +1901,14 @@ retry:
 		 * TODO: implement writing to socket notification
 		 * for user about ban 
 		 */
-		syslog(LOG_INFO, "Ban active for IP %s, closing connection on fd=%d",
+		syslog(LOG_INFO, "ban active for IP %s, closing connection on fd=%d",
 				inet_ntoa(cli_addr.sin_addr), fd);
 		goto accept_failed;
 	}
 
 	user = malloc(sizeof(struct user_t));
 	if (user == NULL) {
-		syslog(LOG_ERR, "accept_client(): malloc(): %m");
+		syslog(LOG_ERR, "accept_client: malloc: %m");
 		close(fd);
 		return;
 	}
@@ -1915,10 +1918,10 @@ retry:
 
 	/* We can't work without textual version of IP address. */
 	if (!inet_ntop(AF_INET, &cli_addr.sin_addr, user->txtaddr, sizeof(user->txtaddr))) {
-		syslog(LOG_ERR, "inet_ntop(): %m");
+		syslog(LOG_ERR, "inet_ntop: %m");
 		goto accept_failed;
 	}
-	syslog(LOG_DEBUG, "Received connection from %s:%hu on fd=%d", user->txtaddr,
+	syslog(LOG_DEBUG, "received connection from %s:%hu on fd=%d", user->txtaddr,
 			ntohs(cli_addr.sin_port), fd);
 
 	/* Init critical vars. */
@@ -1940,7 +1943,7 @@ retry:
 	EV_SET(&kev[1], user->fd, EVFILT_WRITE, EV_ADD, 0, 0, &user->outbufq);
 	while ((ret = kevent(kq, kev, 2, NULL, 0, NULL)) < 0) {
 		if (errno != EINTR) {
-			syslog(LOG_ERR, "accept_client(): initial user kevent(): %m");
+			syslog(LOG_ERR, "accept_client: initial user kevent: %m");
 			goto accept_failed;
 		}
 	}
@@ -2018,7 +2021,7 @@ read_header:
 			return;
 		}
 	else if ((ret > 0) && (ret < 4))	/* Should never occur. */
-		syslog(LOG_EMERG, "handle_read(): fd=%d: read() impossibly returned <4 (%d) bytes of header",
+		syslog(LOG_CRIT, "handle_read: fd=%d: read() impossibly returned <4 (%d) bytes of header",
 				fd, ret);
 
 	/* Successful read, parse. */
@@ -2029,15 +2032,15 @@ read_header:
 	syslog(LOG_DEBUG, "handle_read(%d): received header with cmd #%hhu, starting to read %d body bytes",
 			fd, user->cmdbyte, user->cmdlen);
 	if (user->cmdlen > 65535)
-		syslog(LOG_WARNING, "Abnormally big command length %d for command %hhu from %s:%hu",
-				user->cmdlen, user->cmdbyte,
+		syslog(LOG_WARNING, "abnormally big command length %d for command %hhu on fd=%d from %s:%hu",
+				user->cmdlen, user->cmdbyte, user->fd,
 				user->txtaddr, ntohs(user->addr.sin_port));
 	if (strict && (user->cmdlen > 65536 + 7)) {
-		syslog(LOG_ERR, "Killing client (possible loss of sync, buffer bytes: %02hhx %02hhx %02hhx %02hhx)",
+		syslog(LOG_ERR, "killing client (possible loss of sync, buffer bytes: %02hhx %02hhx %02hhx %02hhx)",
 				buf[0], buf[1], buf[2], buf[3]);
 	}
 	if (user->cmdlen == 0) {
-		syslog(LOG_ERR, "Zero command length from %s:%hu, killing user id=%d",
+		syslog(LOG_ERR, "zero command length from %s:%hu, killing user id=%d",
 				user->txtaddr, ntohs(user->addr.sin_port), fd);
 		kill_user(user, 0, "SEA protocol violation");
 		return;
@@ -2047,7 +2050,7 @@ read_header:
 	if (user->cmdlen != 1) {
 		user->inbuf = malloc(user->cmdlen-1);
 		if (user->inbuf == NULL) {
-			syslog(LOG_ERR, "malloc(): %m");
+			syslog(LOG_ERR, "handle_read: malloc: %m");
 			kill_user(user, 0, "can't allocate input buffer for client");
 			return;
 		}
@@ -2064,7 +2067,7 @@ read_header:
 		EV_SET(&kev, user->fd, EVFILT_READ, EV_ADD, NOTE_LOWAT, 1, (void*)user);
 		while ((ret = kevent(kq, &kev, 1, NULL, 0, NULL)) < 0) {
 			if (errno != EINTR) {
-				syslog(LOG_ERR, "handle_read(): adding kevent(): %m");
+				syslog(LOG_ERR, "handle_read: adding kevent: %m");
 				kill_user(user, 0, "kevent() failed for client");
 				return;
 			}
@@ -2135,7 +2138,7 @@ read_done:
 		EV_SET(&kev, user->fd, EVFILT_READ, EV_ADD|EV_ONESHOT, NOTE_LOWAT, 4, (void*)user);
 		while ((ret = kevent(kq, &kev, 1, NULL, 0, NULL)) < 0) {
 			if (errno != EINTR) {
-				syslog(LOG_ERR, "handle_read(): adding kevent(): %m");
+				syslog(LOG_ERR, "handle_read: adding kevent: %m");
 				kill_user(user, 0, "kevent() failed for client");
 				return;
 			}
@@ -2175,7 +2178,7 @@ handle_write(int fd, struct outbufstq *obufq, u_short kqflags, u_int sockerr, in
 		/* Deschedule writes. */
 		EV_SET(&kev, fd, EVFILT_WRITE, EV_DISABLE, 0, 0, obufq);
 		if ((kevent(kq, &kev, 1, NULL, 0, NULL) < 0) && (errno != EINTR))
-			syslog(LOG_ERR, "event_loop(): disabling kevent(): %m");
+			syslog(LOG_ERR, "handle_write: disabling kevent: %m");
 	}
 	return;
 
@@ -2196,11 +2199,11 @@ write_err:
 	 */
 	if (sockerr) {
 		errno = sockerr;
-		syslog(LOG_ERR, "Connection to archiver lost: %m");
+		syslog(LOG_ERR, "connection to archiver lost: %m");
 		disconnect_sock(archsock, &archq);
 		archsock = -1;
 	} else {
-		syslog(LOG_INFO, "Archiver closed connection (%s)",
+		syslog(LOG_INFO, "archiver closed connection (%s)",
 				STAILQ_EMPTY(obufq) ? "clean" :
 				"our buffer still has data");
 		reconnect_archiver(true);
@@ -2210,6 +2213,19 @@ write_err:
 /*
  * Triggers every ARCH_TIMEOUT seconds - either ping existing connection
  * or initiate new one.
+ *
+ * Archiver protocol command for pings of archiver - a server current time:
+ * 
+ *     TIME 0 unixtime\n
+ *
+ * Here bytecount is always zero and timestamp serves addition purpose: it
+ * allows to determine in archiver log rough time when server connection
+ * was loosed. The whole thing is a little hacky, but that's the nature of
+ * TCP/IP: the archiver is allowed to close it's writing end at any moment
+ * still continuing to read our messages. So we can't rely on reading EOF
+ * and must ping archiver periodically in hope OS will detect disconnect as
+ * early as it could, not many hours later with the first message after the
+ * idle period, losing that message.
  */
 void
 handle_pingtimer(void *udata)
@@ -2253,7 +2269,7 @@ event_loop(void)
 	 */
 	ret = kevent(kq, NULL, 0, &kev, 1, NULL);
 	if (errno != EINTR)
-	syslog(LOG_DEBUG, "event_loop(): debug: ret=%d errno=%d kev={ %d, %hd, %#hx, %u, %d, %p }",
+	syslog(LOG_DEBUG, "event_loop: debug: ret=%d errno=%d kev={ %d, %hd, %#hx, %u, %d, %p }",
 			ret, errno, kev.ident, kev.filter, kev.flags, kev.fflags, kev.data, kev.udata);
 	if (ret != 1)
 		return;
@@ -2291,7 +2307,7 @@ event_loop(void)
 		admin_command(kev.ident);
 		break;
 	default:
-		syslog(LOG_WARNING, "unexpected kevent filter %d", kev.filter);
+		syslog(LOG_WARNING, "event_loop: unexpected kevent filter %d", kev.filter);
 	}
 }
 
@@ -2480,7 +2496,7 @@ main(int argc, char *argv[])
 
 	EV_SET(&kev[0], servsock, EVFILT_READ, EV_ADD, 0, 0, NULL);
 	if (kevent(kq, &kev[0], 1, NULL, 0, NULL) < 0) {
-		syslog(LOG_ERR, "initial kevent(): %m");
+		syslog(LOG_ERR, "initial kevent: %m");
 		exit(EX_OSERR);
 	}
 
@@ -2492,7 +2508,7 @@ main(int argc, char *argv[])
 	 */
 	EV_SET(&kev[0], 0, EVFILT_TIMER, EV_ADD, 0, ARCH_TIMEOUT*1000, &archq);
 	if ((kevent(kq, kev, 1, NULL, 0, NULL) < 0))
-		syslog(LOG_ERR, "adding timer kevent(): %m");
+		syslog(LOG_ERR, "adding timer kevent: %m");
 
 	/*
 	 * Connect archiver first time before clients. If it is descriptor
@@ -2506,7 +2522,7 @@ main(int argc, char *argv[])
 	else if (archsock > 0) {/* already opened, monitor writes */	
 		EV_SET(&kev[0], archsock, EVFILT_WRITE, EV_ADD|EV_CLEAR, 0, 0, &archq);
 		if ((kevent(kq, kev, 1, NULL, 0, NULL) < 0))
-			syslog(LOG_ERR, "adding archiver write kevent(): %m");
+			syslog(LOG_ERR, "adding archiver write kevent: %m");
 	}
 
 	/*
@@ -2522,7 +2538,7 @@ main(int argc, char *argv[])
 	EV_SET(&kev[2], SIGUSR2, EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
 	EV_SET(&kev[3], SIGINFO, EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
 	if ((kevent(kq, kev, 4, NULL, 0, NULL) < 0))
-		syslog(LOG_ERR, "adding signal kevent(): %m");
+		syslog(LOG_ERR, "adding signal kevent: %m");
 
 
 	quit = 0;
