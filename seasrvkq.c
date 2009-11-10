@@ -5,7 +5,7 @@
  * Covered by BSD license.
  *
  * Project started on 22.05.09 17:30 UTC+7.
- * Time spent: 46:12 before first run, 27:15 debugging.
+ * Time spent: 46:12 before first run, 28:00 debugging.
  * 
  * Could be used as an example of using many kqueue() features,
  * see comments in code marked KQ FEATURE.
@@ -1302,7 +1302,8 @@ admin_command(int signo)
 						curuser->penalty_timer, curuser->last_activity,
 						curuser->username, curuser->compname);
 				append_outbufq(&archq, textline, strlen(textline), NULL);
-				append_outbufq(&archq, curuser->userinfo, curuser->infolen, NULL);
+				if (curuser->infolen > 0)
+					append_outbufq(&archq, curuser->userinfo, curuser->infolen, NULL);
 			}
 		/* TODO: if (debug) dump global variables */
 		try_write(archsock, &archq, 0);
