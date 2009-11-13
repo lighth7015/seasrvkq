@@ -5,7 +5,7 @@
  * Covered by BSD license.
  *
  * Project started on 22.05.09 17:30 UTC+7.
- * Time spent: 46:12 before first run, 28:00 debugging.
+ * Time spent: 46:12 before first run, 28:10 debugging.
  * 
  * Could be used as an example of using many kqueue() features,
  * see comments in code marked KQ FEATURE.
@@ -2201,14 +2201,12 @@ write_err:
 	if (sockerr) {
 		errno = sockerr;
 		syslog(LOG_ERR, "connection to archiver lost: %m");
-		disconnect_sock(archsock, &archq);
-		archsock = -1;
-	} else {
+	} else
 		syslog(LOG_INFO, "archiver closed connection (%s)",
 				STAILQ_EMPTY(obufq) ? "clean" :
 				"our buffer still has data");
-		reconnect_archiver(true);
-	}
+	disconnect_sock(archsock, &archq);
+	archsock = -1;
 }
 
 /*
