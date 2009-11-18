@@ -5,8 +5,11 @@
  * Covered by BSD license.
  *
  * Project started on 22.05.09 17:30 UTC+7.
- * Time spent: 46:12 before first run, 28:10 debugging.
+ * Time spent: 46:12 before first run, 29:20 debugging before
+ * putting server to full production use, 6 months after start.
  * 
+ * $Id: seasrvkq.c,v 1.7 2009-11-18 16:18:13 vadimnuclight Exp $
+ *
  * Could be used as an example of using many kqueue() features,
  * see comments in code marked KQ FEATURE.
  *
@@ -62,6 +65,7 @@
 		syslog(LOG_CRIT, "Not enough memory! Sorry, but daemon can't continue."); \
 		exit(EX_OSERR);								 \
 	}
+#define dsyslog if (debug > 1) syslog
 #define roundup2power2(x) ((1 << (fls(x) - 1) == x) ? x: 1 << ((fls(x) - 1) + 1))
 
 #define ALARM_TIME	1
@@ -540,7 +544,7 @@ try_write(int fd, struct outbufstq *q, int hint)
 		/* Actually try to do combined write. */
 		nwritten = writev(fd, iov, iovcnt);
 		saved_errno = errno;
-		syslog(LOG_DEBUG, "debug: try_write(%d): writev() returned %d", fd, nwritten);
+		dsyslog(LOG_DEBUG, "debug: try_write(%d): writev() returned %d", fd, nwritten);
 		errno = saved_errno;
 		if (nwritten > 0) {
 			/* Iterate and free fully written chunks of queue. */
@@ -602,7 +606,7 @@ try_write(int fd, struct outbufstq *q, int hint)
 		/* Buffer calculated, write it. */
 		n = write(fd, pos, len);
 		saved_errno = errno;
-		syslog(LOG_DEBUG, "debug: try_write(%d): write() returned %d", fd, n);
+		dsyslog(LOG_DEBUG, "debug: try_write(%d): write() returned %d", fd, n);
 		errno = saved_errno;
 		if (n > 0) {
 			nwritten += n;
@@ -966,6 +970,7 @@ reconnect_archiver(bool disconnect_and_reparse)
 		if (parse_addr(&archaddr, archpath) >= 0)
 			return;
 
+	syslog(LOG_INFO, "initiating connect to archiver on %s", archpath);
 	connect_sock(&archsock, &archq, (struct sockaddr*)&archaddr);
 }
 
@@ -1251,16 +1256,20 @@ admin_command(int signo)
 				kill_user(curuser, 0, "killed by admin");
 			}
 		break;
-	case SIGUSR2:	/* set archive link, ban timeout or unban user */
+	case SIGUSR2:	/* set archive link, debug, ban timeout or unban user */
 		if (fd > 0) {
 			ban_timeout = (fd > flood_threshold * DEF_MAXPENALTY) ?
 				fd : flood_threshold * DEF_MAXPENALTY;
-			syslog(LOG_INFO, "setting ban timeout to: %d", ban_timeout);
+			syslog(LOG_NOTICE, "setting ban timeout to: %d", ban_timeout);
 		} else if (ban_address(admcmd, INADDR_NONE, -1) == 0)
-			syslog(LOG_INFO, "unbanned %s", admcmd);
-		else {
+			syslog(LOG_NOTICE, "unbanned %s", admcmd);
+		else if (!strcmp(admcmd, "debug")) {
+			debug = (debug + 1) % 3;
+			syslog(LOG_INFO, "setting debug level to %d", debug);
+			setlogmask(LOG_UPTO(debug > 0 ? LOG_DEBUG : LOG_INFO));
+		} else {
 			strlcpy(archlink, admcmd, sizeof(archlink));
-			syslog(LOG_INFO, "setting archive URL to: %s", admcmd);
+			syslog(LOG_NOTICE, "setting archive URL to: %s", admcmd);
 		}
 		break;
 	case SIGHUP:
@@ -1305,14 +1314,22 @@ admin_command(int signo)
 				if (curuser->infolen > 0)
 					append_outbufq(&archq, curuser->userinfo, curuser->infolen, NULL);
 			}
-		/* TODO: if (debug) dump global variables */
+		if (debug) {	/* dump global variables */
+			textline[0] = '\0';
+			snprintf(textline, MAXPATHLEN, "GLOBALVARS 0 debug=%d "
+					"strict=%d flood_threshold=%d ban_timeout=%d "
+					"usercount=%d archsock=%d archpath=%s\n",
+					debug, strict, flood_threshold, ban_timeout,
+					usercount, archsock, archpath);
+			append_outbufq(&archq, textline, strlen(textline), NULL);
+		}
 		try_write(archsock, &archq, 0);
 		break;
 	case SIGWINCH:	/* change alternative address */
 		if (ipaddr == INADDR_NONE)
 			syslog(LOG_ERR, "admin_command: IPv4 address expected instead of %s", admcmd);
 		else {
-			syslog(LOG_INFO, "sending new secondary server IP address (%s) to all clients", admcmd);
+			syslog(LOG_NOTICE, "sending new secondary server IP address (%s) to all clients", admcmd);
 			buf[0] = SEA_S2C_CHGALTSRVIP;
 			LIST_FOREACH(curuser, &userlist, entries) {
 				append_outbufq(&curuser->outbufq, buf, 1, NULL);
@@ -1513,7 +1530,7 @@ process_command(struct user_t *user)
 	struct dbuf *bcastbuf;
 
 	ASSERT(user != NULL);
-	syslog(LOG_DEBUG, "process_command: debug fd=%d: entering with cmd #%d and cmdlen=%d",
+	dsyslog(LOG_DEBUG, "process_command: debug fd=%d: entering with cmd #%d and cmdlen=%d",
 			user->fd, user->cmdbyte, user->cmdlen);
 
 	/*
@@ -1774,7 +1791,8 @@ process_command(struct user_t *user)
 		append_outbufq(&user->outbufq, buf, 2, NULL);
 		append_outbufq(&user->outbufq, archlink, strlen(archlink), NULL);
 		schedule_write(user->fd, &user->outbufq);
-		syslog(LOG_DEBUG, "process_command: debug fd=%d: archlink req, sending %hhu bytes", user->fd, buf[0]);
+		syslog(LOG_INFO, "client id=%d %s[%s] requested archlink, sending %hhu bytes",
+				user->fd, user->username, user->compname, buf[1]);
 		break;
 	case SEA_C2S_MUTE:		/* 10 */
 		if (user->cmdlen < 3)
@@ -1885,7 +1903,7 @@ accept_client(void)
 
 retry:
 	fd = accept(servsock, (struct sockaddr *)&cli_addr, &clilen);
-	syslog(LOG_DEBUG, "entering accept_client: accept() returned fd=%d (%m)", fd);
+	dsyslog(LOG_DEBUG, "debug: entering accept_client: accept() returned fd=%d (%m)", fd);
 	if ((fd < 0) && (errno == EINTR))
 		goto retry;
 	if (fd <= 0)	/* XXX Our architecture and protocol prohibits id=0. */
@@ -1973,7 +1991,7 @@ handle_read(int fd, struct user_t *user, u_short kqflags, u_int sockerr, intptr_
 	time_t curtime;
 
 	ASSERT((user != NULL) && (fd == user->fd));
-	syslog(LOG_DEBUG, "entering handle_read(%d, %p, %#hx, %u, %d)",
+	dsyslog(LOG_DEBUG, "debug: entering handle_read(%d, %p, %#hx, %u, %d)",
 			fd, user, kqflags, sockerr, sizehint);
 
 	if (kqflags & EV_EOF) {
@@ -2160,7 +2178,7 @@ handle_write(int fd, struct outbufstq *obufq, u_short kqflags, u_int sockerr, in
 	int ret;
 
 	ASSERT((obufq != NULL) && (fd > 0));
-	syslog(LOG_DEBUG, "entering handle_write(%d, %p, %#hx, %u, %d)",
+	dsyslog(LOG_DEBUG, "debug: entering handle_write(%d, %p, %#hx, %u, %d)",
 			fd, obufq, kqflags, sockerr, sizehint);
 
 	/* Connection was closed by other side? */
@@ -2358,6 +2376,7 @@ usage(char *proctitle, char full)
 		"           regardless of whether users from it are currently connected.\n"
 		"  SIGUSR2  Set ban timeout to specified number of seconds (-t), unban address\n"
 		"           (or address/mask) or set archiver URL for responses to clients (-u).\n"
+		"           If keyword is 'debug', cycle to next debug (-d) level (0 after 2).\n"
 		"  SIGHUP   Set archiver socket path/address to specified ipaddr:port or Unix\n"
 		"           domain socket path. Same as -a, except preopened descriptor number\n"
 		"           here is not allowed. Only sets address variable for future use, to\n"
@@ -2482,6 +2501,8 @@ main(int argc, char *argv[])
 
 	if (!debug) {
 		if (quiet)
+			setlogmask(LOG_UPTO(LOG_NOTICE));
+		else
 			setlogmask(LOG_UPTO(LOG_INFO));
 		if (daemon(0, 0) < 0) {	/* Make program a daemon */
 			syslog(LOG_ERR, "daemon() failed");
