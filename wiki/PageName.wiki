@@ -1,0 +1,3 @@
+#summary Protocol description
+
+Currently the protocol is described in russian only here: http://code.google.com/p/blastcore/wiki/SEAProtocol
