@@ -8,7 +8,7 @@
  * Time spent: 46:12 before first run, 29:20 debugging before
  * putting server to full production use, 6 months after start.
  * 
- * $Id: seasrvkq.c,v 1.7 2009-11-18 16:18:13 vadimnuclight Exp $
+ * $Id$
  *
  * Could be used as an example of using many kqueue() features,
  * see comments in code marked KQ FEATURE.
@@ -1526,8 +1526,10 @@ process_command(struct user_t *user)
 {
 	uint16_t userid, msglen;
 	struct user_t *curuser;
-	char buf[MAXBYTE+1];
-	struct dbuf *bcastbuf;
+	unsigned char buf[MAXBYTE+1];
+	uint8_t buf102msghdr[8];	/* message header for proto version >= 102 */
+	uint32_t bigmsglen;		/* to place to hdr for proto version >= 102 */
+	struct dbuf *bcastbuf, *bigbuf;
 
 	ASSERT(user != NULL);
 	dsyslog(LOG_DEBUG, "process_command: debug fd=%d: entering with cmd #%d and cmdlen=%d",
@@ -1652,7 +1654,16 @@ process_command(struct user_t *user)
 		msglen = ntohs(msglen);
 		if (user->cmdlen < msglen + 7)	/* we'll handle message with zero length later */
 			goto invalid_format;
-		CHECK_LENGTH(msglen + 7);
+		/*
+		 * Ver 102 extension is allowed ONLY when it can't fit to 64K.
+		 */
+		if (user->version < 102)
+			CHECK_LENGTH(msglen + 7)
+		else if ((user->cmdlen < 65535 + 7) && (msglen + 7 < user->cmdlen)) {
+			syslog(LOG_ERR, "client id=%d %s[%s] tried msglen=%hu but proto ver 102 disallowed on cmdlen < 64K",
+				user->fd, user->username, user->compname, msglen);
+			goto invalid_format;
+		}
 
 		/*
 		 * Begin to prepare output headers in local buffer.
@@ -1675,8 +1686,8 @@ process_command(struct user_t *user)
 			break;
 		}
 		user->penalty_timer += 8;	/* not so strict flood control */
-		syslog(LOG_INFO, "message from client id=%d %s[%s] to id=%hu (%hu bytes)",
-				user->fd, user->username, user->compname, userid, msglen);
+		syslog(LOG_INFO, "message from client id=%d %s[%s] to id=%hu (%hu/%d bytes)",
+				user->fd, user->username, user->compname, userid, msglen, user->cmdlen - 7);
 
 		/*
 		 * SEA SHIT: message to printers is considered private!
@@ -1704,6 +1715,38 @@ process_command(struct user_t *user)
 		archive_msg(user, userid, bcastbuf);
 
 		/*
+		 * Handle long messages for protocol version 102 and later.
+		 *
+		 * While an older client will get only msglen bytes (part of
+		 * message), a newer client must get a full length in header.
+		 * Thus, message length bytes will be a lower two bytes of
+		 * total length, and the higher (third), MSB byte is split
+		 * two to nibbles in the two printers flag bytes.
+		 */
+		bigbuf = NULL;	/* also a flag, need to send or not */
+		if ((user->version >= 102) && (user->cmdlen > msglen + 7)) {
+			bigmsglen = user->cmdlen - 7;
+			bigbuf = alloc_dbuf(bigmsglen - msglen);
+			memcpy(bigbuf->data, &user->inbuf[6 + msglen], bigmsglen - msglen);
+
+			/* Now do bits-and-bytes tricks... */
+			memcpy(buf102msghdr, buf, 8);
+			bigmsglen = htonl(bigmsglen);
+			memcpy(&buf102msghdr[4], &bigmsglen, 4);
+
+			/* Now buf102msghdr[6..7] are ready, split 5th byte */
+			buf102msghdr[4] = buf102msghdr[5] & 0xf0;
+			buf102msghdr[5] = (buf102msghdr[5] & 0x0f) << 4;
+
+			/*
+			 * And restore printer flags (or whatever there wil
+			 * be in lower 4 bits in later versions?), if any.
+			 */
+			buf102msghdr[4] |= buf[4] & 0x0f;
+			buf102msghdr[5] |= buf[5] & 0x0f;
+		}
+
+		/*
 		 * Then actually send msg.
 		 */
 		buf[8] = buf[9] = 0;
@@ -1711,7 +1754,11 @@ process_command(struct user_t *user)
 			if ((userid == 0) ||
 			    (userid == curuser->fd) ||
 			    (userid == 65535) && (curuser->is_printer) && (curuser->version >= 97)) {
-				append_outbufq(&curuser->outbufq, buf, 8, bcastbuf);
+				if ((curuser->version >= 102) && bigbuf) {
+					append_outbufq(&curuser->outbufq, buf102msghdr, 8, bcastbuf);
+					append_outbufq(&curuser->outbufq, NULL, 0, bigbuf);
+				} else
+					append_outbufq(&curuser->outbufq, buf, 8, bcastbuf);
 				/*
 				 * SEA SHIT: due to TCPSender support, server
 				 * appended to message 1-byte len, username,
@@ -1723,6 +1770,8 @@ process_command(struct user_t *user)
 				schedule_write(curuser->fd, &curuser->outbufq);
 			}		
 		free_dbuf(bcastbuf);
+		if (bigbuf)
+			free_dbuf(bigbuf);
 		break;
 	case SEA_C2S_PING:		/* 3 */
 		CHECK_LENGTH(1);
@@ -2050,11 +2099,11 @@ read_header:
 	sizehint -= 4;		/* exclude header */
 	syslog(LOG_DEBUG, "handle_read(%d): received header with cmd #%hhu, starting to read %d body bytes",
 			fd, user->cmdbyte, user->cmdlen);
-	if (user->cmdlen > 65535)
+	if ((user->cmdlen > 65535) && (user->version < 102))
 		syslog(LOG_WARNING, "abnormally big command length %d for command %hhu on fd=%d from %s:%hu",
 				user->cmdlen, user->cmdbyte, user->fd,
 				user->txtaddr, ntohs(user->addr.sin_port));
-	if (strict && (user->cmdlen > 65536 + 7)) {
+	if (strict && (user->cmdlen > 65536 + 7) && (user->version < 102)) {
 		syslog(LOG_ERR, "killing client (possible loss of sync, buffer bytes: %02hhx %02hhx %02hhx %02hhx)",
 				buf[0], buf[1], buf[2], buf[3]);
 	}
@@ -2282,7 +2331,8 @@ event_loop(void)
 	/*
 	 * KQ will only return EV_ERROR if there were changes AND some of them
 	 * were errorneous, so we will not check it below (information from
-	 * FreeBSD 6.2 kernel sources).
+	 * FreeBSD 6.2 kernel sources).  Note that FreeBSD 8 will have another
+	 * mechanism, EV_RECEIPT, but it is not yet available at the moment.
 	 */
 	ret = kevent(kq, NULL, 0, &kev, 1, NULL);
 	if (errno != EINTR)
