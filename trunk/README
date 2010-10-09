@@ -1,0 +1,26 @@
+This is seasrvkqd, a SEA protocol server daemon for FreeBSD (non-portable).
+The SEA protocol is core of home-made simple LAN Instant Messaging system,
+SEA Sender, developed at AVTF Hostel of Tomsk Polytechnic University, Russia.
+
+See http://code.google.com/hosting/search?q=label:SEA-protocol for clients.
+
+The protocol is ugly by design and is not recommended, but this daemon could
+serve as a teaching example of using BSD's kqueue()/kevent() facilities in
+a real world application, though.
+
+Server has no documentation (except at the web site), but prints detailed
+help if called as: ./seasrvkqd -h
+
+There is also a script to send message from command line, seasend.sh.
+It also has the only doc printed by -h command line switch.
+
+INSTALLATION:
+
+First, open Makefile and change BINDIR and USER for your system.
+Then just run 'make' in this directory to compile.
+After that 'make install' will install daemon and rc.d script running
+daemon as user you specified.
+A 'make uninstall' is also supported.
+
+The home page for project is http://code.google.com/p/seasrvkq/
+Check it for additional docs and may be updates.

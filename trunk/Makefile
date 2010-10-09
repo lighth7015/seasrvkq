@@ -21,4 +21,5 @@ install: $(OUTNAME)
 uninstall:
 	rm -rf $(RCDIR)/$(PROGNAME)
 	rm -rf $(BINDIR)/$(OUTNAME)
+all: $(OUTNAME)
 
