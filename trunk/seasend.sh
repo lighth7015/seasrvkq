@@ -10,6 +10,7 @@ id=0
 user=`whoami`
 comp=`hostname -s`
 server=kernblitz.nuclight.avtf.net
+pflags=0
 
 onebyte()
 {
@@ -72,7 +73,7 @@ and later). The total limit is 64 Kb for version 101 and older clients
 EOH
 }
 
-args=`getopt b:c:d:m:r:s:h $*`
+args=`getopt b:c:d:m:p:r:s:h $*`
 if [ $? -ne 0 ]; then
 	usage
 	exit 2
@@ -84,6 +85,13 @@ for i; do
 			id=$2; shift;
 			if [ -z "$id" -o "$id" -lt 0 -o "$id" -gt 65535 ]; then
 				echo "Invalid ID, must be between 0 and 65535"
+				exit 1
+			fi
+			shift;;
+		-p)
+			pflags=$2; shift;
+			if [ -z "$pflags" -o "$pflags" -lt 0 -o "$pflags" -gt 255 ]; then
+				echo "Invalid prio/flags, must be between 0 and 255"
 				exit 1
 			fi
 			shift;;
@@ -176,7 +184,7 @@ fi
 	fi
 
 	# now actually send msg, headers first
-	printf "`hton3 $totalcmdlen`\2`htons $id`\0\0`htons $msglen`"
+	printf "`hton3 $totalcmdlen`\2`htons $id``onebyte $pflags`\0`htons $msglen`"
 	cat $msgfile
 
 	# add RTF part, if present

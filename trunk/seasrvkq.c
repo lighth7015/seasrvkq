@@ -70,6 +70,9 @@
 
 #define ALARM_TIME	1
 #define ARCH_TIMEOUT	90	/* Seconds between connection attempts. */
+#define TIMER_INTRVL	10	/* Following timeouts must bt multiple of this. */
+#define PING_TIMEOUT	120	/* Seconds between user pings. */
+#define LOGIN_TIMEOUT	30	/* Time from connect to first cmd - or kill. */
 #define DEF_MAXPENALTY	10	/* Seconds of flood without throttling. */
 #define DEF_FKILLTHRESH	6	/* 6*10 default flood threshold to kill */
 #define SYSLOG_IDENT "seasrvkqd"
@@ -989,6 +992,7 @@ kill_user(struct user_t *user, int sockerr, char *reason)
 	char buf[3];
 	struct flooder *cf, *tf;
 	struct user_t *curuser;
+	struct kevent kev;
 
 	ASSERT(user != NULL);
 
@@ -1011,6 +1015,16 @@ kill_user(struct user_t *user, int sockerr, char *reason)
 			append_outbufq(&curuser->outbufq, buf, 3, NULL);
 			schedule_write(curuser->fd, &curuser->outbufq);
 		}
+	} else {
+		/*
+		 * Delete login timeout timer.
+		 * XXX Don't check error because we could be called from
+		 * this timer trigger but also from other errors. Not the
+		 * ideal solution...
+		 */
+		EV_SET(&kev, user->fd, EVFILT_TIMER, EV_DELETE, 0, 0, NULL);
+		if ((kevent(kq, &kev, 1, NULL, 0, NULL) < 0))
+			syslog(LOG_DEBUG, "deleting login timer kevent: %m");
 	}
 
 	/*
@@ -1734,16 +1748,15 @@ process_command(struct user_t *user)
 			bigmsglen = htonl(bigmsglen);
 			memcpy(&buf102msghdr[4], &bigmsglen, 4);
 
-			/* Now buf102msghdr[6..7] are ready, split 5th byte */
-			buf102msghdr[4] = buf102msghdr[5] & 0xf0;
-			buf102msghdr[5] = (buf102msghdr[5] & 0x0f) << 4;
-
 			/*
-			 * And restore printer flags (or whatever there wil
-			 * be in lower 4 bits in later versions?), if any.
+			 * Now buf102msghdr[5..7] bytes are ready, copy flags
+			 * byte from 102+ client (whatever there will be in
+			 * upper 7 bits in later versions?) and restore
+			 * printer flag, if any.
 			 */
-			buf102msghdr[4] |= buf[4] & 0x0f;
-			buf102msghdr[5] |= buf[5] & 0x0f;
+			buf102msghdr[4] = user->inbuf[2];
+			buf102msghdr[4] &= 0xfe; /* clear if not to printers */
+			buf102msghdr[4] |= buf[4] & 0x01;
 		}
 
 		/*
@@ -1754,6 +1767,17 @@ process_command(struct user_t *user)
 			if ((userid == 0) ||
 			    (userid == curuser->fd) ||
 			    (userid == 65535) && (curuser->is_printer) && (curuser->version >= 97)) {
+				/*
+				 * XXX hack: 102 aplies only to >64K, but
+				 * prio/flags should be set for smaller
+				 * messages, too. So we must patch this byte
+				 * every time...
+				 */
+				buf[4] = (userid == 65535) ? 1 : 0;
+				if (curuser->version >= 102)
+					buf[4] |= user->inbuf[2] & 0xfe;
+
+				/* Actual appending. */
 				if ((curuser->version >= 102) && bigbuf) {
 					append_outbufq(&curuser->outbufq, buf102msghdr, 8, bcastbuf);
 					append_outbufq(&curuser->outbufq, NULL, 0, bigbuf);
@@ -1982,6 +2006,7 @@ retry:
 	}
 	bzero(user, sizeof(struct user_t));
 	user->fd = fd;
+	user->last_activity = time(NULL);
 	memcpy(&user->addr, &cli_addr, sizeof(struct sockaddr_in));
 
 	/* We can't work without textual version of IP address. */
@@ -2015,6 +2040,16 @@ retry:
 			goto accept_failed;
 		}
 	}
+
+	/*
+	 * Set up a personal timer to fire if client issues no command in
+	 * required interval. We don't strictly check error here because
+	 * it is not critical and something will occur later anyway. This
+	 * is not the best way to do things. though.
+	 */
+	EV_SET(&kev[0], user->fd, EVFILT_TIMER, EV_ADD|EV_ONESHOT, 0, LOGIN_TIMEOUT*1000, user);
+	if ((kevent(kq, kev, 1, NULL, 0, NULL) < 0))
+		syslog(LOG_INFO, "accept_client: adding login timer kevent: %m");
 
 	/* We don't care about writing to client before his first cmd. */
 
@@ -2298,6 +2333,9 @@ handle_pingtimer(void *udata)
 {
 	time_t curtime = time(NULL);
 	char textline[MAXPATHLEN];
+	struct user_t *user, *tmpuser;
+	int timeout;
+	uint8_t pong;
 
 	/*
 	 * XXX That should be KQ FEATURE of using passed udata, but
@@ -2306,17 +2344,58 @@ handle_pingtimer(void *udata)
 	 * as I want it to be, but I have no time to rewrite (it works),
 	 * so let it it be SO stupid way of using passed udata variable...
 	 */
-	ASSERT(udata == &archq);
+	ASSERT((udata == &archq) || (udata == NULL));
 
-	textline[0] = '\0';
-	snprintf(textline, MAXPATHLEN, "TIME 0 %d\n", curtime);
+	if (udata) {
+		textline[0] = '\0';
+		snprintf(textline, MAXPATHLEN, "TIME 0 %d\n", curtime);
 
-	if (archsock > 0) {
-		append_outbufq(&archq, textline, strlen(textline), NULL);
-		try_write(archsock, &archq, 0);
-	} else {
-		reconnect_archiver(false);
+		if (archsock > 0) {
+			append_outbufq(&archq, textline, strlen(textline), NULL);
+			try_write(archsock, &archq, 0);
+		} else {
+			reconnect_archiver(false);
+		}
+	} else {	/* Check clients for timeouts. */
+		LIST_FOREACH_SAFE(user, &userlist, entries, tmpuser) {
+			/*
+			 * SEA SHIT: 10 minutes for native client, 2 minutes for
+			 * BlastCore, but has to wait a little more - client may
+			 * issue it's own ping, and our pong may reset it's own
+			 * ping timer, so we'll not get last_activity increase!
+			 */
+			timeout = user->version < 98 ? PING_TIMEOUT * 5 : PING_TIMEOUT;
+			timeout += TIMER_INTRVL;
+			if (user->last_activity < curtime - timeout - PING_TIMEOUT) {
+				/* No command within interval */
+				kill_user(user, 0, "ping timeout");
+			} else if (user->last_activity < curtime - timeout) {
+				/* Try to pong reply, in hope client will understand*/
+				pong = SEA_S2C_PONG;
+				append_outbufq(&user->outbufq, &pong, 1, NULL);
+				schedule_write(user->fd, &user->outbufq);
+				syslog(LOG_INFO, "forced pong to client id=%d %s[%s]", user->fd,
+						user->username, user->compname);
+			}
+		}
 	}
+}
+
+/*
+ * Login timeout.
+ *
+ * Check if user is still not logged in, and if so, kill him.
+ * Thie is triggered only once.
+ */
+void
+login_timeout(void *udata)
+{
+	struct user_t *user = udata;
+
+	ASSERT(udata != NULL);
+
+	if ((user->unamelen == 0) && (user->cnamelen == 0))
+		kill_user(user, 0, "login timeout");
 }
 
 /*
@@ -2357,12 +2436,17 @@ event_loop(void)
 		break;
 	case EVFILT_TIMER:
 		/*
-		 * Connection timer expired.
-		 * KQ FEATURE: This is used only to demonstrate kqueue() timers, this
-		 * is the only one, in addition to main SIGALRM timer, so we don't care
-		 * about timer number.
+		 * Connection timer expired or login timer expired.
+		 * KQ FEATURE: Let's demonstrate kqueue() timers, we have two
+		 * persistent ones, in addition to main SIGALRM timer, there we
+		 * don't care about timer number (just NULL or data). All other
+		 * timers are EV_ONESHOT - deleted after first fire. We use them
+		 * to check expired logins.
 		 */
-		handle_pingtimer(kev.udata);
+		if (kev.ident <= 1)
+			handle_pingtimer(kev.udata);
+		else
+			login_timeout(kev.udata);
 		break;
 	case EVFILT_SIGNAL:
 		/*
@@ -2575,9 +2659,12 @@ main(int argc, char *argv[])
 	 * a periodic connection attempt timer. We don't do anything on error
 	 * because archiver is optional facility. The timer is periodic so the
 	 * reconnect_archiver() will check itself should it do the work or not.
+	 * SEA SHIT: We also add timer 1 for pings, but the protocol is weird,
+	 * clients ping server, so we can't do much and this is optional, too.
 	 */
 	EV_SET(&kev[0], 0, EVFILT_TIMER, EV_ADD, 0, ARCH_TIMEOUT*1000, &archq);
-	if ((kevent(kq, kev, 1, NULL, 0, NULL) < 0))
+	EV_SET(&kev[1], 1, EVFILT_TIMER, EV_ADD, 0, TIMER_INTRVL*1000, NULL);
+	if ((kevent(kq, kev, 2, NULL, 0, NULL) < 0))
 		syslog(LOG_ERR, "adding timer kevent: %m");
 
 	/*
