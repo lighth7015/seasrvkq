@@ -1039,12 +1039,14 @@ kill_user(struct user_t *user, int sockerr, char *reason)
 
 	/* Perform logging, if caller wishes so. */
 	if (reason)
-		syslog(LOG_INFO, "client id=%d %s[%s] disconnected: %s",
-			user->fd, user->username, user->compname, reason);
+		syslog(LOG_INFO, "client id=%d %s[%s] (%s:%hu) disconnected: %s",
+			user->fd, user->username, user->compname, user->txtaddr,
+			ntohs(user->addr.sin_port), reason);
 	else if (sockerr) {
 		errno = sockerr;
-		syslog(LOG_INFO, "client id=%d %s[%s] disconnected: %m",
-			user->fd, user->username, user->compname);
+		syslog(LOG_INFO, "client id=%d %s[%s] (%s:%hu) disconnected: %m",
+			user->fd, user->username, user->compname, user->txtaddr,
+			ntohs(user->addr.sin_port));
 	}
 
 	/* Free resources. */
@@ -1407,6 +1409,7 @@ process_usercomp(struct user_t *user)
 	struct user_t *curuser;
 	struct dbuf *uinfobuf;
 	char buf[576];
+	struct kevent kev;
 
 	ASSERT(user != NULL);
 
@@ -1521,6 +1524,15 @@ process_usercomp(struct user_t *user)
 	buf[0] = 0;
 	buf[1] = 0;
 	append_outbufq(&user->outbufq, buf, 2, NULL);
+
+	/*
+	 * Now user has logged in, delete his login timer:
+	 * if user will disconnect before timer fires, then
+	 * login_timeout() will be called with ptr to freed memory.
+	 */
+	EV_SET(&kev, user->fd, EVFILT_TIMER, EV_DELETE, 0, 0, NULL);
+	if ((kevent(kq, &kev, 1, NULL, 0, NULL) < 0))
+		syslog(LOG_DEBUG, "deleting login timer kevent: %m");
 
 	syslog(LOG_INFO, "client id=%d %s[%s] logged in from %s:%hu",
 			user->fd, user->username, user->compname, user->txtaddr, ntohs(user->addr.sin_port));
@@ -2338,8 +2350,8 @@ handle_pingtimer(void *udata)
 	uint8_t pong;
 
 	/*
-	 * XXX That should be KQ FEATURE of using passed udata, but
-	 * this program don't really needs it. In addition, this whole
+	 * KQ FEATURE: this is using of passed udata, but this function don't
+	 * really needs it (login_timeout() do). In addition, this whole
 	 * archiver-handling funcs system sucks :( It is not so generic
 	 * as I want it to be, but I have no time to rewrite (it works),
 	 * so let it it be SO stupid way of using passed udata variable...
@@ -2347,6 +2359,9 @@ handle_pingtimer(void *udata)
 	ASSERT((udata == &archq) || (udata == NULL));
 
 	if (udata) {
+		/*
+		 * Archiver timeouts.
+		 */
 		textline[0] = '\0';
 		snprintf(textline, MAXPATHLEN, "TIME 0 %d\n", curtime);
 
@@ -2356,7 +2371,10 @@ handle_pingtimer(void *udata)
 		} else {
 			reconnect_archiver(false);
 		}
-	} else {	/* Check clients for timeouts. */
+	} else {
+		/*
+		 * Check clients for timeouts.
+		 */
 		LIST_FOREACH_SAFE(user, &userlist, entries, tmpuser) {
 			/*
 			 * SEA SHIT: 10 minutes for native client, 2 minutes for
@@ -2365,17 +2383,23 @@ handle_pingtimer(void *udata)
 			 * ping timer, so we'll not get last_activity increase!
 			 */
 			timeout = user->version < 98 ? PING_TIMEOUT * 5 : PING_TIMEOUT;
-			timeout += TIMER_INTRVL;
-			if (user->last_activity < curtime - timeout - PING_TIMEOUT) {
-				/* No command within interval */
-				kill_user(user, 0, "ping timeout");
-			} else if (user->last_activity < curtime - timeout) {
-				/* Try to pong reply, in hope client will understand*/
+			timeout += TIMER_INTRVL * 2;
+			if ((curtime - user->last_activity > timeout) &&
+			    (curtime - user->last_activity <= timeout + TIMER_INTRVL)) {
+				/*
+				 * Try to pong reply, in hope client will
+				 * understand, but only once (timer fires often).
+				 */
 				pong = SEA_S2C_PONG;
 				append_outbufq(&user->outbufq, &pong, 1, NULL);
 				schedule_write(user->fd, &user->outbufq);
 				syslog(LOG_INFO, "forced pong to client id=%d %s[%s]", user->fd,
 						user->username, user->compname);
+			} else if (curtime - user->last_activity > timeout + PING_TIMEOUT) {
+				/*
+				 * No input command within interval.
+				 */
+				kill_user(user, 0, "ping timeout");
 			}
 		}
 	}
