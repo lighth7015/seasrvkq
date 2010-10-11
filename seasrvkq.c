@@ -2197,6 +2197,8 @@ read_body:
 	ret = read(fd, &user->inbuf[user->readlen - 1],
 			sizehint > (user->cmdlen - user->readlen) ?
 			(user->cmdlen - user->readlen) : sizehint);
+	dsyslog(LOG_DEBUG, "debug: handle_read(%d): readlen was %d and read() returned %d",
+			fd, user->readlen, ret);
 	if (ret >= 0)
 		user->readlen += ret;
 	else if (errno != EINTR) {

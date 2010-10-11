@@ -12,6 +12,14 @@ comp=`hostname -s`
 server=kernblitz.nuclight.avtf.net
 pflags=0
 
+# be somewhat cross-platform...
+if [ `uname` = "FreeBSD" ]; then
+	stat="/usr/bin/stat -f %z"
+else
+	# Linux
+	stat="/usr/bin/stat -c %s"
+fi
+
 onebyte()
 {
 	printf "\\\\%o" $1
@@ -56,7 +64,7 @@ getflen()
 usage()
 {
 	cat << EOH
-Usage: $0 [-s srv] [-d id] [-u user] [-c comp] -m file [-r file] [-b file]
+Usage: $0 [-s srv] [-d id] [-u user] [-c comp] -m file [-r file] [-b file] [-p num]
 
    -s	Server address to connect to (default is $server)
    -d	Destination user ID, defaults to 0 (entire group)
@@ -65,6 +73,7 @@ Usage: $0 [-s srv] [-d id] [-u user] [-c comp] -m file [-r file] [-b file]
    -m	File name with plain text of message to send
    -r	File name of RTF-formatted version of message to send
    -b	Any (binary) file attached to message
+   -p	Decimal raw value of prio/flags byte (with bit 0 too)
 
 All files must be regular to be able to know file size. Formatted versions
 are understood by clients with protocol version 101 and later (BlastCore 0.4
@@ -73,7 +82,7 @@ and later). The total limit is 64 Kb for version 101 and older clients
 EOH
 }
 
-args=`getopt b:c:d:m:p:r:s:h $*`
+args=`getopt b:c:d:m:p:r:s:u:h $*`
 if [ $? -ne 0 ]; then
 	usage
 	exit 2
@@ -202,4 +211,4 @@ fi
 	
 	# all done, final wait to settle, to receive from server, etc.
 	sleep 15
-}| nc $server 8732 | hd
+} | nc $server 8732 | hexdump -C
