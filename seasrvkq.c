@@ -1,6 +1,6 @@
 /*
  * AVTF SEA Sender server daemon rewrite in C using BSD kqueue.
- * (c) Vadim Goncharov <vadim_nuclight@mail.ru>, 2009.
+ * (c) Vadim Goncharov <vadim_nuclight@mail.ru>, 2009-2010.
  *
  * Covered by BSD license.
  *
@@ -982,7 +982,7 @@ reconnect_archiver(bool disconnect_and_reparse)
  * etc. cleanup. It is safe to call this on a struct of user which is
  * not yet fully logged in. Does actual disconnect without any reasons and
  * logging by default - it is responsibility of the caller to provide errno
- * (coskerr used only if non-zero) or another textual reason for kill.
+ * (sockerr used only if non-zero) or another textual reason for kill.
  *
  * Pointer to user will become invalid after call.
  */
@@ -1252,7 +1252,7 @@ admin_command(int signo)
 		 * We can ban user by ID, by IP, by address:port of it's
 		 * connection, and finally, ban a subnet, killing all matching
 		 * users. In the latter case, we do so by banning subnet and
-		 * then checjing each user against banlust. We try to keep only
+		 * then checking each user against banlust. We try to keep only
 		 * one entry in banlist.
 		 */
 		if ((strchr(admcmd, '/')) || (ipaddr != INADDR_NONE))
@@ -1702,7 +1702,7 @@ process_command(struct user_t *user)
 		/*
 		 * Now process destination user id and don't send empty msgs.
 		 * SEA SHIT: original server allowed this while it is almost
-		 * always a bug in client or flooding user.
+		 * always a bug in client or evil user tries to flood.
 		 */
 		memcpy(&userid, user->inbuf, 2);
 		userid = ntohs(userid);
@@ -1746,8 +1746,8 @@ process_command(struct user_t *user)
 		 * While an older client will get only msglen bytes (part of
 		 * message), a newer client must get a full length in header.
 		 * Thus, message length bytes will be a lower two bytes of
-		 * total length, and the higher (third), MSB byte is split
-		 * two to nibbles in the two printers flag bytes.
+		 * total length, and the higher (third), MSB byte is placed
+		 * to second of the two printers flag bytes (one is enough).
 		 */
 		bigbuf = NULL;	/* also a flag, need to send or not */
 		if ((user->version >= 102) && (user->cmdlen > msglen + 7)) {
@@ -1862,7 +1862,7 @@ process_command(struct user_t *user)
 		/*
 		 * We do a trick here - chat is entirely client-to-client
 		 * thing, server doesn't pay attention to anything except IDs,
-		 * even length is the same. So we just patch ID in our inbuf
+		 * even length is the same. So we simply patch ID in our inbuf
 		 * and then just copy this to destination user.
 		 *
 		 * SEA SHIT: that was even not so for versions < 94! But I
@@ -2007,8 +2007,11 @@ retry:
 
 	if (check_banlist(NULL, cli_addr.sin_addr.s_addr)) {
 		/*
-		 * TODO: implement writing to socket notification
-		 * for user about ban 
+		 * SEA SHIT: we can't implement a notification for user about
+		 * ban because this proto doesn't support any commands to
+		 * client before login (and ban's goal is exactly opposite:
+		 * deny login). Compare e.g. with IRC which allows writing
+		 * such notification to socket immediately.
 		 */
 		syslog(LOG_INFO, "ban active for IP %s, closing connection on fd=%d",
 				inet_ntoa(cli_addr.sin_addr), fd);
@@ -2041,11 +2044,11 @@ retry:
 	/*
 	 * At this time user struct is initialized to minimum - and
 	 * not yet plugged into userlist. All what we can here is
-	 * to wait initail command from client - and we can optimize
+	 * to wait initial command from client - and we can optimize
 	 * by waiting for at least minimal-sized full SEA_C2S_USERCOMP
 	 * command, not just SEA packet length (KQ FEATURE).
 	 *
-	 * We also won't defer addinbg writing notifications - kevent() will
+	 * We also won't defer adding writing notifications - kevent() will
 	 * return ENOENT in schedule_write() if only do EV_ENABLE there without
 	 * EV_ADD; also, this will allocate kernel memory for event right here.
 	 */
@@ -2114,7 +2117,7 @@ handle_read(int fd, struct user_t *user, u_short kqflags, u_int sockerr, intptr_
 	 * What do we read? We use KQ FEATURE to return an event only
 	 * once via EV_ONESHOT, and ability to not return it until
 	 * specified number of bytes will be available, via NOTE_LOWAT.
-	 * Thus, we process byte stream in of two states, either:
+	 * Thus, we process byte stream in one of two states, either:
 	 * - reading 3 byte SEA packet length + 1 byte cmd, or
 	 * - reading the rest of the packet (of specified length).
 	 * By using water mark, we are able to read header at once,
@@ -2340,7 +2343,7 @@ write_err:
  *
  * Here bytecount is always zero and timestamp serves addition purpose: it
  * allows to determine in archiver log rough time when server connection
- * was loosed. The whole thing is a little hacky, but that's the nature of
+ * was loost. The whole thing is a little hacky, but that's the nature of
  * TCP/IP: the archiver is allowed to close it's writing end at any moment
  * still continuing to read our messages. So we can't rely on reading EOF
  * and must ping archiver periodically in hope OS will detect disconnect as
@@ -2386,7 +2389,7 @@ handle_pingtimer(void *udata)
 			/*
 			 * SEA SHIT: 10 minutes for native client, 2 minutes for
 			 * BlastCore, but has to wait a little more - client may
-			 * issue it's own ping, and our pong may reset it's own
+			 * issue it's own ping, and our pong may reset client's
 			 * ping timer, so we'll not get last_activity increase!
 			 */
 			timeout = user->version < 98 ? PING_TIMEOUT * 5 : PING_TIMEOUT;
@@ -2469,7 +2472,7 @@ event_loop(void)
 		/*
 		 * Connection timer expired or login timer expired.
 		 * KQ FEATURE: Let's demonstrate kqueue() timers, we have two
-		 * persistent ones, in addition to main SIGALRM timer, there we
+		 * persistent ones, in addition to main SIGALRM timer. Here we
 		 * don't care about timer number (just NULL or data). All other
 		 * timers are EV_ONESHOT - deleted after first fire. We use them
 		 * to check expired logins.
@@ -2493,7 +2496,9 @@ event_loop(void)
 	}
 }
 
-/* Print short help about command line and exit. */
+/*
+ * Print short help about command line and exit.
+ */
 void
 usage(char *proctitle, char full)
 {
@@ -2512,48 +2517,7 @@ usage(char *proctitle, char full)
 		"  -u\tURL of archiver web page to answer to clients\n"
 		"  -f\tFlood threshold coefficient determinig when client will be killed\n"
 		"  -t\tTimeout for temporary bans (both manual and auto) of IP addresses\n\n"
-		"Server supports connection to separate archiver process using simple protocol\n"
-		"(see comments in source code, this may be even simple shell script), address\n"
-		"can be specified as either ipaddr:port, path to Unix domain socket or the\n"
-		"preopened file descriptor number, in the latter case on-failure reconnects to\n"
-		"archiver are not supported, and daemon could be started from Bourne shells\n"
-		"using redirection e.g. like this:\n\n"
-		"  %s -a 3 3>&1 | /path/to/archiver.sh\n\n"
-		"Server also implements primitive IRC-like flood control on clients by first\n"
-		"throttling when clinets floods more than allowed max_penalty time (default 10\n"
-		"seconds). If client continues to flood more than flood_threshold * max_penalty\n"
-		"seconds (default flood threshold is 6 giving 1 minute), then it is killed and\n"
-		"banned for -t secs (can't be less flood_threshold * max_penalty) by resetting\n"
-		"connection requests (because SEA clients always try to reconnect immediately).\n"
-		"These bans are temporary, so you should consider tcpdrop(8) and firewall bans\n"
-		"for malicious users.\n\n"
-		"Daemon is controlled via placing command as a destination of control symlink\n"
-		"and then issuing one ot the supported signals to daemon process, e.g. to kill\n"
-		"(and ban for current ban timeout) all users with IP address 1.2.3.4, you do:\n\n"
-		"  ln -s 1.2.3.4 /var/run/seasrvkq.ctl; killall -USR1 seasrvkqd\n\n"
-		"Daemon always requires something to be present in the control symlink when\n"
-		"is signal caught, and uses slightly weird system of modifying behaviour based\n"
-		"on whether symlink contains positive integer number, IP address, ipaddr:port,\n"
-		"IP address/mask in CIDR format (e.g. 1.2.3.0/24), some keyword or any other\n"
-		"string. Currently supported signals are:\n\n"
-		"  SIGUSR1  Kill and ban user(s) with specified ID, address or address:port\n"
-		"           of it's conection. Address is always banned for usual timeout,\n"
-		"           regardless of whether users from it are currently connected.\n"
-		"  SIGUSR2  Set ban timeout to specified number of seconds (-t), unban address\n"
-		"           (or address/mask) or set archiver URL for responses to clients (-u).\n"
-		"           If keyword is 'debug', cycle to next debug (-d) level (0 after 2).\n"
-		"  SIGHUP   Set archiver socket path/address to specified ipaddr:port or Unix\n"
-		"           domain socket path. Same as -a, except preopened descriptor number\n"
-		"           here is not allowed. Only sets address variable for future use, to\n"
-		"           force reconnect send SIGHUP twice with the same addr spec.\n"
-		"  SIGINFO  Print to archiver socket full information about user(s) with\n"
-		"           specified ID, address or ipaddr:port of it's connection, or info\n"
-		"           about all users if symlink equals to keyword 'all'. Also dump some\n"
-		"           of the global variables when running in debug mode.\n"
-		"  SIGWINCH Takes IP address and sends it in protocol command #13 to all clients\n"
-		"           (to make them set secondary server IP address in their configs).\n\n"
-		"In FreeBSD, you can obtain both user IP addresses/ports and IDs via sockstat(1)\n"
-		"command, because daemon uses FD number as user ID.\n"
+		"For details about signals, flood control, etc. see manual page.\n"
 		: "For more help type %s -h\n",
 		proctitle);
 	exit(EX_USAGE);
@@ -2626,7 +2590,7 @@ main(int argc, char *argv[])
 		exit(EX_OSERR);
 	}
 
-	/* Fix the address already in use error */
+	/* Fix the "address already in use" error */
 	i = 1;
 	if (setsockopt(servsock, SOL_SOCKET, SO_REUSEADDR, &i, sizeof(int)) == -1)
 		syslog(LOG_WARNING, "setsockopt(SO_REUSEADDR) on listening socket failed: %m");
@@ -2646,7 +2610,7 @@ main(int argc, char *argv[])
 		exit(EX_OSERR);
 	}
 
-	/* Put socket into non-blocking mode */
+	/* Put socket into non-blocking mode. */
 	if (sock_nonblock(servsock) == -1) {
 		syslog(LOG_ERR, "can't make listening socket nonblocking, exiting!");
 		exit(EX_OSERR);
@@ -2675,7 +2639,9 @@ main(int argc, char *argv[])
 		}
 	}
 
-	/* kqueue() descriptors are not inherited after fork(). */
+	/*
+	 * kqueue() descriptors are not inherited after fork().
+	 */
 	if ((kq = kqueue()) < 0)
 		syslog(LOG_ERR, "kqueue() failed: %m");
 
