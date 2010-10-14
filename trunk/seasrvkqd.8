@@ -1,0 +1,282 @@
+.\" (c) Vadim Goncharov <vadim_nuclight@mail.ru>, 2010.
+.\"
+.\" All rights reserved.
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in the
+.\"    documentation and/or other materials provided with the distribution.
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+.\" ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+.\" FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+.\" OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+.\" HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+.\" LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+.\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+.\" SUCH DAMAGE.
+.\"
+.Dd October 15, 201
+.Dt SEASRVKQD 8
+.Sh NAME
+.Nm seasrvkqd
+.Nd "server daemon for a SEA Sender protocol"
+.Sh SYNOPSIS
+.Nm
+.Op Fl dqs
+.Op Fl c Ar filepath
+.Op Fl a Ar addrspec
+.Op Fl u Ar url
+.Op Fl f Ar number
+.Op Fl t Ar seconds
+.Sh DESCRIPTION
+This is a kqueue-based server daemon for a custom SEA Sender protocol,
+see comments at the beginning of source code for more details.
+.Pp
+The options are as follows:
+.Bl -tag -width ".Fl d Ar threshold"
+.It Fl d
+Do not fork, enable debug.
+Specify this option twice for extra info debug info.
+.It Fl q
+Be quiet to syslog (log fewer info).
+Ignored when used with
+.Fl d
+option.
+.It Fl s
+Enable stricter protocol format checks.
+Kill client on error instead of just warning to logs.
+.It Fl c Ar filepath
+Path to control commands symlink, defaults to
+.Pa /var/run/seasrvkq.ctl .
+.It Fl a Ar addrspec
+Address specification for archiver to connect to (see below)
+.Fl d
+option with required argument
+.Ar argument .
+.It Fl u Ar url
+URL of archiver web page to answer to clients on command #9.
+An
+.Ar url
+defaults to
+.Em http://sea.avtf.net/archive/ .
+.It Fl f Ar threshold
+Flood threshold coefficient determinig when client will be killed.
+The
+.Ar threshold
+defaults to 6 and can't be less than 3 (silently reinterpreted as 3 if is).
+.It Fl t Ar seconds
+Timeout for temporary bans (both manual and auto) of IP addresses.
+Defaults to 
+.Ar threshold * max_penalty
+seconds.
+This timeout can't be less then
+.Ar flood_threshold * max_penalty
+(6 * 10) seconds.
+If it is less, it will be silently raised to this value.
+.El
+.Pp
+An
+.Ar addrspec
+could be one of the following:
+.Bl -bullet
+.It
+A positive integer number less than 65536 (that is, 0 isn't allowed).
+This is file descriptor (FD) number, and this daemon uses FD number as
+a SEA Sender protocol client ID number.
+.It
+An IPv4 address and port in the usual form
+.Sq 1.2.3.4:5678 .
+.It
+An absolute path to a Unix domain socket, e.g.\& to a
+.Pa /var/run/arch.sock . 
+.El
+.Sh MESSAGE ARCHIVING
+Server supports connection to separate archiver process using simple protocol
+(see comments in source code, this may be even simple shell script).
+Address can be specified as an
+.Ar addrspec
+described above.
+If the
+.Ar addrspec
+is either ipaddr:port or path to Unix domain socket, daemon initiates
+connection to this address, periodically pings it and reconnects if
+connection is lost.
+If
+.Ar addrspec
+is a number, it is treated as preopened file descriptor number, in the
+latter case on-failure reconnects to archiver are not supported (but
+another address could be signalled to daemon, though).
+To have a descriptor preopened, daemon could be started from Bourne shells
+using redirection e.g.\& like this:
+.Pp
+.Dl seasrvkqd -a 3 3>&1 | /path/to/archiver.sh
+.Pp
+.Sh FLOOD CONTROL
+Server also implements primitive IRC-like flood control on clients.
+First, if client floods more than allowed
+.Ar max_penalty
+time (default 10 seconds), it is throttled by reading only one command
+every 2 seconds.
+If client continues to flood more than
+.Ar flood_threshold * max_penalty
+seconds (default flood
+.Ar threshold
+is 6 giving 1 minute), then it is killed and banned for
+.Fl t Ar seconds
+timeout.
+Ban is implemented by resetting connection requests (because SEA clients
+always try to reconnect immediately).
+These bans are temporary, so you should consider
+.Xr tcpdrop 8
+and firewall bans for malicious users.
+.Pp
+The algorithm of flood control is follows:
+.Bl -enum
+.It
+If client's penalty time is in past, it is first set current time.
+.It
+For every command read from client, penalty time is incremented by one or
+more seconds, depending on nature of the command.
+.It
+If penalty time looks ahead of current time to future by more than
+.Ar max_penalty
+seconds, then client is throttled by processing each command once per
+2 seconds.
+.It
+As time goes, if clients still floods, penalty time will eventually be
+more than
+.Ar max_penalty * flood_threshold
+seconds ahead of current time.
+Then client is killed and banned.
+.El
+.Pp
+In addition to this constant penalty, daemon also have a logarithmic
+penalty of the command (message) length, but that is applied only to
+long (more than 256 bytes) commands.
+The threshold of logarithmic algorithm was chosen for client to be
+penalized by 1 second for length < 256 bytes, 2 seconds for 256 to 512,
+3 seconds for 512 to 1024, and so on.
+.Pp
+The goal is to allow the client to be not throttled
+in usual small message mode, and throttling threshold should not be
+exceeded immediately after the first command - that is, goal is to
+allow safe sending e.g.\& one chat message per 2 seconds and one
+(small) group message per 10 seconds.
+.Sh SIGNALS AND CONTROLLING DAEMON
+Server is controlled via a slightly weird way.
+There are more commands than accepted signals, and a string argument is
+placed into control symlink as it's destination.
+When daemon receives signal, it always reads control symlink and will
+ignore signal if symlink cannot be read.
+This mechanism is similar to FreeBSD's
+.Pa /etc/malloc.conf
+in that the symlink doesn't point to any real file.
+For example, to kill (and ban for current ban timeout) all users with
+IP address 1.2.3.4, you do:
+.Pp
+.Dl ln -s 1.2.3.4 /var/run/seasrvkq.ctl; killall -USR1 seasrvkqd
+.Pp
+Then daemon is modifying behaviour based on whether symlink
+contains positive integer number, IP address, ipaddr:port, IP address/mask
+in CIDR format (e.g. 1.2.3.0/24), some keyword or any other
+string.
+Many commands are equivalent to command-line options.
+Currently supported signals are:
+.Pp
+.Bl -tag -width "SIGWINCH"
+.It SIGUSR1
+Kill and ban user(s) with specified ID, address or address:port
+of it's conection.
+Address is always banned for usual timeout,
+regardless of whether users from it are currently connected.
+.It SIGUSR2
+Set ban timeout to specified number of seconds
+.Ns ( Fl t ) ,
+unban address (or address/mask) or set archiver URL for responses
+to clients
+.Ns ( Fl u ) .
+If keyword is
+.Sq debug ,
+cycle to next debug
+.Ns ( Fl d )
+level (0 repeats after 2).
+.It SIGHUP
+Set archiver socket path/address to specified ipaddr:port or Unix
+domain socket path. Same as
+.Fl a ,
+except preopened descriptor number
+here is not allowed.
+Only sets address variable for future use, to
+force reconnect send SIGHUP twice with the same
+.Ar addrspec .
+.It SIGINFO
+Print to archiver socket full information about user(s) with
+specified ID, address or ipaddr:port of it's connection, or info
+about all users if symlink equals to keyword
+.Sq all .
+Also dump some of the global variables when running in debug mode.
+.It SIGWINCH
+Takes IP address and sends it in protocol command #13 to all clients
+(to make them set secondary server IP address in their configs).
+.El
+.Pp
+This can be shortly summarized in the following table, where
+.Dq -
+says that combination is not supported (prohibited), and
+.Dq *
+advices to look above for something non-obvious.
+.Pp
+.TS
+lb lb lb lb lb lb lb
+lb l l l l l l.
+\&	Number	IP Addr	ip:port	Net/mask	Keyword	Any string
+SIGUSR1	ban one	ban all	ban all	ban all	-	-
+SIGUSR2	timeout	unban	unban	unban	'debug'	set URL
+SIGHUP	-	-	archiver*	-	-	archiver*
+SIGINFO	dump one	dump all	dump one	-	'all'	-
+SIGWINCH	-	alt srv	-	-	-	-
+.TE
+.Pp
+In FreeBSD, you can obtain both user IP addresses/ports and IDs via
+.Xr sockstat 1
+command, because daemon uses FD number as user ID.
+.Sh FILES
+.Bl -tag -width ".Pa /dev/null" -compact
+.It Pa /var/run/seasrvkq.ctl
+Default value of path to control symlink.
+.El
+.Sh EXAMPLES
+The following is an example of a typical usage
+of the
+.Nm
+command:
+.Pp
+.Dl "seasrvkqd -sa /var/run/arch.sock -u http://site.ru/archiver/"
+.Sh SEE ALSO
+.Xr sockstat 1 ,
+.Xr tcpdrop 8
+.Rs
+.%T "SEA Sender Protocol Description (in Russian)"
+.%O http://code.google.com/p/blastcore/wiki/SEAProtocol
+.Re
+.Rs
+.%T "Sender And It's History (in Russian)"
+.%O http://thesender.ru/
+.Re
+.Sh HISTORY
+Server is written in 2009 for AVTF TPU Hostel as a replacement for 2006's
+Java server and VC++ 6.0 SEA Sender client by Alexey Fadeev (#Kpot#) and
+Sergey Khilkov (J7).
+.Sh AUTHORS
+.An Vadim Goncharov Aq vadim_nuclight@mail.ru .
+.Sh BUGS
+The overall system is ugly and not recommended to use.
+See protocol description and history for overview of architectural flaws.
