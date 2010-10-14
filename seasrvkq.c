@@ -1780,14 +1780,19 @@ process_command(struct user_t *user)
 			    (userid == curuser->fd) ||
 			    (userid == 65535) && (curuser->is_printer) && (curuser->version >= 97)) {
 				/*
-				 * XXX hack: 102 aplies only to >64K, but
+				 * XXX proto 102 aplies only to >64K, but
 				 * prio/flags should be set for smaller
 				 * messages, too. So we must patch this byte
-				 * every time...
+				 * every time. But not only this: proto 102
+				 * treats buf[5] as part of length, so in case
+				 * of small msg to printers we can't set it
+				 * to 1, but for old versions we must!
 				 */
-				buf[4] = (userid == 65535) ? 1 : 0;
-				if (curuser->version >= 102)
+				buf[4] = buf[5] = (userid == 65535) ? 1 : 0;
+				if (curuser->version >= 102) {
 					buf[4] |= user->inbuf[2] & 0xfe;
+					buf[5] = 0;
+				}
 
 				/* Actual appending. */
 				if ((curuser->version >= 102) && bigbuf) {
