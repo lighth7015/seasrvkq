@@ -2503,7 +2503,7 @@ void
 usage(char *proctitle, char full)
 {
 	fprintf(stderr,
-		"Usage: %s [-dqs] [-c path] [-a addr] [-u URL] [-f num] [-t sec]\n\n",
+		"Usage: %s [-dqs] [-c path] [-a addrspec] [-u URL] [-f num] [-t sec] [-p port]\n\n",
 		proctitle);
 	fprintf(stderr, (full == 'h') ?
 		"This is a server daemon for a custom SEA Sender protocol, see comments at the\n"
@@ -2515,6 +2515,7 @@ usage(char *proctitle, char full)
 		"  -s\tEnable stricter protocol format checks (kill client on error)\n"
 		"  -a\tAddress specification for archiver to connect to (see below)\n"
 		"  -u\tURL of archiver web page to answer to clients\n"
+		"  -p\tPort to listen on, instead of default 8732\n"
 		"  -f\tFlood threshold coefficient determinig when client will be killed\n"
 		"  -t\tTimeout for temporary bans (both manual and auto) of IP addresses\n\n"
 		"For details about signals, flood control, etc. see manual page.\n"
@@ -2530,6 +2531,7 @@ main(int argc, char *argv[])
 	struct accept_filter_arg afa;
 	struct kevent kev[4];
 	int ch, i, quiet = 0;
+	uint16_t port = SEA_PORT;
 	struct sockaddr_in serv_addr;
 	char *proctitle;
 
@@ -2539,7 +2541,7 @@ main(int argc, char *argv[])
 
 	proctitle = argv[0];
 	/* Parse command line options. */
-	while ((ch = getopt(argc, argv, "a:c:df:qstu:h")) != -1) {
+	while ((ch = getopt(argc, argv, "a:c:df:p:qstu:h")) != -1) {
 		switch (ch) {
 		case 'd':
 			debug += 1;
@@ -2561,6 +2563,9 @@ main(int argc, char *argv[])
 		case 't':
 			ban_timeout = (atoi(optarg) < flood_threshold * DEF_MAXPENALTY) ?
 				flood_threshold * DEF_MAXPENALTY : atoi(optarg);
+			break;
+		case 'p':
+			port = (uint16_t)atoi(optarg);
 			break;
 		case 'q':
 			quiet = 1;
@@ -2598,10 +2603,10 @@ main(int argc, char *argv[])
 	memset(&serv_addr, 0, sizeof(struct sockaddr_in));
 	serv_addr.sin_family = AF_INET;
 	serv_addr.sin_addr.s_addr = INADDR_ANY;
-	serv_addr.sin_port = htons(SEA_PORT);
+	serv_addr.sin_port = htons(port);
 
 	if (bind(servsock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) == -1) {
-		syslog(LOG_ERR, "bind() to port %d failed: %m", SEA_PORT);
+		syslog(LOG_ERR, "bind() to port %hu failed: %m", port);
 		exit(EX_OSERR);
 	}
 	
