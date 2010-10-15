@@ -31,6 +31,7 @@
 .Sh SYNOPSIS
 .Nm
 .Op Fl dqs
+.Op Fl p Ar port
 .Op Fl c Ar filepath
 .Op Fl a Ar addrspec
 .Op Fl u Ar url
@@ -53,6 +54,15 @@ option.
 .It Fl s
 Enable stricter protocol format checks.
 Kill client on error instead of just warning to logs.
+.It Fl p Ar port
+Listen on a port
+.Ar port
+instead of default 8732.
+However, this is of limited use, as no clients are currently able
+to connect to non-default port.
+You may want to use OS redirection tools (e.g.\&
+.Nm "ipfw fwd" )
+to do such experiments.
 .It Fl c Ar filepath
 Path to control commands symlink, defaults to
 .Pa /var/run/seasrvkq.ctl .
@@ -100,7 +110,8 @@ An absolute path to a Unix domain socket, e.g.\& to a
 .El
 .Sh MESSAGE ARCHIVING
 Server supports connection to separate archiver process using simple protocol
-(see comments in source code, this may be even simple shell script).
+(see below) to save messages and dump data requested by admin (usually
+too big to go to syslog).
 Address can be specified as an
 .Ar addrspec
 described above.
@@ -119,6 +130,62 @@ using redirection e.g.\& like this:
 .Pp
 .Dl seasrvkqd -a 3 3>&1 | /path/to/archiver.sh
 .Pp
+Server only writes to archiver socket, not reads, so it is possible for you
+to live without separate process - just redirect that stream to file.
+The protocol is simple text line-oriented human-readble.
+Each command is a text line with case-insensitive first field and integer
+second field, number of other space-separated fields depends on command:
+.Pp
+.Dl cmd bytecount may be other args till end of line\en
+.Pp
+Then there $bytecount bytes of raw data (often zero), then next line for next
+command, and so on.
+This can be easily read and parsed by the following shell script:
+.Pp
+.Bd -literal -offset indent
+#!/bin/sh
+
+while read what bytes restofline; do
+        msg=`dd bs=1 count=$bytes 2>/dev/null`
+        echo what: $what rest of line: $restofline
+        echo bytes: "$msg"
+done
+.Ed
+.Pp
+This is only a skeleton, of course.
+Customize for your needs.
+.Bl -diag
+.It Note #1:
+this protocol is used for other purposes, too, so archiver must
+parse command and extract only (public) messages to save, if it wishes.
+.It Note #2:
+raw data can contain any bytes, e.g. line breaks in \er\en form,
+while protocol itself delimits by Unix convention (\en only), be prepared.
+.El
+Here is the format of message command:
+.Pp
+.Dl MSG count src_id user_txtIP dst_id unixtime username[machinename]\en
+.Pp
+Example message from user John at machine FOOBAR (id=4) to all users
+(id=0) at 2009-02-13 23:31:30 UTC, then message from user with spaces
+in user and machine name, both with CR LF's in message texts:
+.Bd -literal -offset indent
+MSG 14 4 192.168.0.5 0 1234567890 John[FOOBAR]
+Hi!
+
+Test.
+MSG 8 5 192.168.0.6 0 1234567904 I am[GOD HERE]
+passed
+.Ed
+.Pp
+Other commands can be found in server source code, but they are usually
+intuitive enough.
+Server also periodically
+.Dq pings
+archiver with a no-operation
+.Em TIME
+command, just giving current server Unix time - this may help to diagnose
+when archiver connection was lost, for example.
 .Sh FLOOD CONTROL
 Server also implements primitive IRC-like flood control on clients.
 First, if client floods more than allowed

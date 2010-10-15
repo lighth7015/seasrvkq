@@ -8,11 +8,11 @@ The protocol is ugly by design and is not recommended, but this daemon could
 serve as a teaching example of using BSD's kqueue()/kevent() facilities in
 a real world application, though.
 
-Server has no documentation (except at the web site), but prints detailed
-help if called as: ./seasrvkqd -h
+Server has only man page as documentation (see Web for more about the
+entire system) and can print a short help if called as: ./seasrvkqd -h
 
 There is also a script to send message from command line, seasend.sh.
-It also has the only doc printed by -h command line switch.
+It has the only doc printed by -h command line switch.
 
 INSTALLATION:
 
