@@ -37,15 +37,16 @@
 .Op Fl u Ar url
 .Op Fl f Ar number
 .Op Fl t Ar seconds
+.Op Fl k Ar addr Ns Op Ns / Ns Ar mask
 .Sh DESCRIPTION
 This is a kqueue-based server daemon for a custom SEA Sender protocol,
 see comments at the beginning of source code for more details.
 .Pp
 The options are as follows:
-.Bl -tag -width ".Fl d Ar threshold"
+.Bl -tag -width ".Fl k Ar addr Ns Op /mask"
 .It Fl d
 Do not fork, enable debug.
-Specify this option twice for extra info debug info.
+Specify this option twice for extra debug info.
 .It Fl q
 Be quiet to syslog (log fewer info).
 Ignored when used with
@@ -91,6 +92,13 @@ This timeout can't be less then
 .Ar flood_threshold * max_penalty
 (6 * 10) seconds.
 If it is less, it will be silently raised to this value.
+.It Fl k Ar addr Ns Op Ns / Ns Ar mask
+Add an IP address (or subnet in CIDR format) to the ban list with
+timeout somewhere in year 2038.
+May be specified several times.
+This option is used to pre-populate ban list, instead of setting
+.Fl t
+to big value and manually adding address via control symlink after start.
 .El
 .Pp
 An
@@ -289,6 +297,9 @@ Print to archiver socket full information about user(s) with
 specified ID, address or ipaddr:port of it's connection, or info
 about all users if symlink equals to keyword
 .Sq all .
+If keyword is
+.Sq bans ,
+then dump current banlist.
 Also dump some of the global variables when running in debug mode.
 .It SIGWINCH
 Takes IP address and sends it in protocol command #13 to all clients
@@ -304,11 +315,11 @@ advices to look above for something non-obvious.
 .TS
 lb lb lb lb lb lb lb
 lb l l l l l l.
-\&	Number	IP Addr	ip:port	Net/mask	Keyword	Any string
+\&	Number	IP Addr	ip:port	Net/mask	Keywords	Any string
 SIGUSR1	ban one	ban all	ban all	ban all	-	-
 SIGUSR2	timeout	unban	unban	unban	'debug'	set URL
 SIGHUP	-	-	archiver*	-	-	archiver*
-SIGINFO	dump one	dump all	dump one	-	'all'	-
+SIGINFO	dump one	dump all	dump one	-	all,bans	-
 SIGWINCH	-	alt srv	-	-	-	-
 .TE
 .Pp
