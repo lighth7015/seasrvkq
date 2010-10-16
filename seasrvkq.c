@@ -153,8 +153,9 @@ STAILQ_HEAD(outbufstq, outbuf);		/* type for header of outbuf queue */
 struct banentry {
 	SLIST_ENTRY(banentry) entries;	/* linked list */
 	time_t		expire;
-	in_addr_t	host;	/* banned IP in human-unreadable form */
+	in_addr_t	host;	/* banned IP in machine-unreadable form */
 	in_addr_t	mask;	/* subnet mask, usually /32 */
+	char txtaddr[MAXTXTIPLEN+4];	/* IP/mask in human-readable form */
 };
 
 /* Element of flood control queue. */
@@ -1125,7 +1126,6 @@ check_banlist(char *textaddr, in_addr_t ipaddr)
 	}
 
 	SLIST_FOREACH(ban, &banlist, entries) {
-		/* TODO: support -k addr/mask (may be port from avtnatpmpd) */
 		if ((ban->host == (ipaddr & ban->mask)) && (curtime < ban->expire))
 			return (ban);
 	}
@@ -1198,7 +1198,10 @@ ban_address(char *textaddr, in_addr_t ipaddr, int timeout)
 	curban->expire = curtime + timeout;
 	curban->host = ipaddr;
 	curban->mask = mask;
-	/* XXX strlcpy(curban->txtaddr, textaddr, sizeof(curban->txtaddr)); */
+	if (textaddr)
+		strlcpy(curban->txtaddr, textaddr, sizeof(curban->txtaddr));
+	else	/* XXX */
+		inet_ntop(AF_INET, (struct in_addr*)&ipaddr, curban->txtaddr, sizeof(curban->txtaddr));
 	return (0);
 }
 
@@ -1229,6 +1232,7 @@ admin_command(int signo)
 	in_addr_t ipaddr;
 	/* time_t curtime = time(NULL); */
 	struct user_t *curuser, *tmpuser;
+	struct banentry *ban;
 	struct sockaddr_storage addr_stor;
 	struct sockaddr_in *addr_in = (struct sockaddr_in*)&addr_stor;
 
@@ -1330,6 +1334,14 @@ admin_command(int signo)
 				if (curuser->infolen > 0)
 					append_outbufq(&archq, curuser->userinfo, curuser->infolen, NULL);
 			}
+		if (!strcmp(admcmd, "bans")) {
+			SLIST_FOREACH(ban, &banlist, entries) {
+				textline[0] = '\0';
+				snprintf(textline, MAXPATHLEN, "BANENTRY 0 txtaddr=%s expire=%d\n",
+						ban->txtaddr, ban->expire);
+				append_outbufq(&archq, textline, strlen(textline), NULL);
+			}
+		}
 		if (debug) {	/* dump global variables */
 			textline[0] = '\0';
 			snprintf(textline, MAXPATHLEN, "GLOBALVARS 0 debug=%d "
@@ -1986,7 +1998,7 @@ accept_client(void)
 {
 	struct kevent kev[2];
 	struct sockaddr_in cli_addr;
-	struct user_t *user;
+	struct user_t *user = NULL;
 	int ret, fd, clilen = sizeof(struct sockaddr_in), yes = 1;
 
 	ASSERT(kev != NULL);
@@ -2078,7 +2090,8 @@ retry:
 
 accept_failed:
 	close(fd);
-	free(user);
+	if (user)
+		free(user);
 	return;
 }
 
@@ -2503,7 +2516,7 @@ void
 usage(char *proctitle, char full)
 {
 	fprintf(stderr,
-		"Usage: %s [-dqs] [-c path] [-a addrspec] [-u URL] [-f num] [-t sec] [-p port]\n\n",
+		"Usage: %s [-dqs] [-p port] [-c path] [-a addrspec] [-u URL] [-f num] [-t sec] [-k addr]\n\n",
 		proctitle);
 	fprintf(stderr, (full == 'h') ?
 		"This is a server daemon for a custom SEA Sender protocol, see comments at the\n"
@@ -2516,6 +2529,7 @@ usage(char *proctitle, char full)
 		"  -a\tAddress specification for archiver to connect to (see below)\n"
 		"  -u\tURL of archiver web page to answer to clients\n"
 		"  -p\tPort to listen on, instead of default 8732\n"
+		"  -k\tKill (ban) specified address[/mask] till year 2038\n"
 		"  -f\tFlood threshold coefficient determinig when client will be killed\n"
 		"  -t\tTimeout for temporary bans (both manual and auto) of IP addresses\n\n"
 		"For details about signals, flood control, etc. see manual page.\n"
@@ -2541,7 +2555,7 @@ main(int argc, char *argv[])
 
 	proctitle = argv[0];
 	/* Parse command line options. */
-	while ((ch = getopt(argc, argv, "a:c:df:p:qstu:h")) != -1) {
+	while ((ch = getopt(argc, argv, "a:c:df:k:p:qstu:h")) != -1) {
 		switch (ch) {
 		case 'd':
 			debug += 1;
@@ -2557,6 +2571,10 @@ main(int argc, char *argv[])
 			break;
 		case 'u':
 			strlcpy(archlink, optarg, sizeof(archlink));
+			break;
+		case 'k':
+			if (ban_address(optarg, INADDR_NONE, 0x7ffffffe - time(NULL)) == -1)
+				fprintf(stderr, "Invalid kill/ban %s, ignoring.\n", optarg);
 			break;
 		case 'f':
 			flood_threshold = atoi(optarg) < 3 ? 3 : atoi(optarg);
