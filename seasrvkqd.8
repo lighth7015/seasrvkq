@@ -38,9 +38,12 @@
 .Op Fl f Ar number
 .Op Fl t Ar seconds
 .Op Fl k Ar addr Ns Op Ns / Ns Ar mask
+.Bk
+.Op Ar connclass ...
+.Ek
 .Sh DESCRIPTION
 This is a kqueue-based server daemon for a custom SEA Sender protocol,
-see comments at the beginning of source code for more details.
+see comments at the beginning of source code and/or web pages for more details.
 .Pp
 The options are as follows:
 .Bl -tag -width ".Fl k Ar addr Ns Op /mask"
@@ -68,38 +71,8 @@ to do such experiments.
 Path to control commands symlink, defaults to
 .Pa /var/run/seasrvkq.ctl .
 .It Fl a Ar addrspec
-Address specification for archiver to connect to (see below)
-.Fl d
-option with required argument
-.Ar argument .
-.It Fl u Ar url
-URL of archiver web page to answer to clients on command #9.
-An
-.Ar url
-defaults to
-.Em http://sea.avtf.net/archive/ .
-.It Fl f Ar threshold
-Flood threshold coefficient determinig when client will be killed.
-The
-.Ar threshold
-defaults to 6 and can't be less than 3 (silently reinterpreted as 3 if is).
-.It Fl t Ar seconds
-Timeout for temporary bans (both manual and auto) of IP addresses.
-Defaults to 
-.Ar threshold * max_penalty
-seconds.
-This timeout can't be less then
-.Ar flood_threshold * max_penalty
-(6 * 10) seconds.
-If it is less, it will be silently raised to this value.
-.It Fl k Ar addr Ns Op Ns / Ns Ar mask
-Add an IP address (or subnet in CIDR format) to the ban list with
-timeout somewhere in year 2038.
-May be specified several times.
-This option is used to pre-populate ban list, instead of setting
-.Fl t
-to big value and manually adding address via control symlink after start.
-.El
+Address specification of archiver for server to connect to (that is,
+the address where archiver listens for incoming connections).
 .Pp
 An
 .Ar addrspec
@@ -116,6 +89,85 @@ An IPv4 address and port in the usual form
 An absolute path to a Unix domain socket, e.g.\& to a
 .Pa /var/run/arch.sock . 
 .El
+.It Fl u Ar url
+URL of archiver web page to answer to clients on command #9.
+The
+.Ar url
+defaults to
+.Em http://sea.avtf.net/archive/ .
+.It Fl f Ar threshold
+Flood threshold coefficient determining when client will be killed.
+The
+.Ar threshold
+defaults to 6 and can't be less than 3 (silently reinterpreted as 3 if it is).
+.It Fl t Ar seconds
+Timeout for temporary bans (both manual and auto) of IP addresses.
+Defaults to 
+.Ar threshold * max_penalty
+seconds.
+This timeout can't be less then
+.Ar flood_threshold * max_penalty
+(6 * 10 by default) seconds.
+If it is less, it will be silently raised to this value.
+.It Fl k Ar addr Ns Op Ns / Ns Ar mask
+Add an IP address (or subnet in CIDR format) to the ban list with
+timeout somewhere in year 2038.
+May be specified several times.
+This option is used to pre-populate ban list, instead of setting
+.Fl t
+to big value and manually adding addresses via control symlink after start.
+.El
+.Pp
+After options follows zero or more
+.Ar connection class
+specifications.
+A
+.Ar connclass
+is defined as:
+.Pp
+.Sm off
+.D1 Ar address Oo / Ar mask Oc : Ar login_timeout : Ar max_conns : Ar max_penalty
+.Sm on
+.Pp
+If
+.Ar mask
+is not specified, than it is assumed to be 32 (that is, a single IP address).
+When server receives a new connection,
+.Ar connection class
+list is evaluated in
+the order specified in the command line, checking client's address against
+each entry.
+Checking stops at the first match (that is, if you have overlapping subnets,
+you must write more specific one first), and parameters described below are
+set for client.
+If there were no match, then their default values are used.
+The parameters are as follows:
+.Bl -tag -width "login_timeout"
+.It Ar login_timeout
+Seconds for newly connected client to issue login command.
+If client doesn't login within this interval, the connection is closed.
+The lower bound is 1 second, the upper bound is 86400 (1 day).
+Default is 30.
+.It Ar max_conns
+Maximum number of users from one IP address.
+Only logged in users are counted to this number.
+Just accepted but not yet
+logged in connections are subject to
+.Ar login_timeout
+instead.
+The lower bound is 1 connection.
+By default this is unlimited (no upper bound).
+.It Ar max_penalty
+Seconds for flood control algorithm before beginning to throttle client.
+See
+.Sx FLOOD CONTROL
+section for more details.
+The default (and lower bound) is 10 seconds.
+.El
+.Pp
+All of these parameters must be within their lower and upper bounds.
+If they are less or more than that bounds, they will be silently reinterpreted
+as corresponding bound.
 .Sh MESSAGE ARCHIVING
 Server supports connection to separate archiver process using simple protocol
 (see below) to save messages and dump data requested by admin (usually
@@ -338,17 +390,46 @@ of the
 command:
 .Pp
 .Dl "seasrvkqd -sa /var/run/arch.sock -u http://site.ru/archiver/"
+.Pp
+The following is a hack for the FreeBSD's rc.d-scripts settings
+.Pa /etc/rc.conf
+in the case you don't need a separate archiver process and need just to
+append everything to file:
+.Pp
+.Dl seasrvkqd_flags="-a 3 3>&1 | daemon sh -c \e"cat >> /tmp/sea.txt\e""
+.Pp
+The following is the more complicated example of daemon usage:
+.Pp
+.Dl "seasrvkqd -t 600 109.123.180.100:7:3:180 109.123.180.0/23:7:3:10"
+.Pp
+Here are the 10-minutes ban timeout and the two connection classes for one
+network the server is directly connected to.
+Connection to this network is fast, thus
+.Ar login_timeout
+is set to a small value.
+Computers in this network are known to be owned by only one user (no NATs), so
+.Ar max_conns
+also set to a small value, safe for possible reconnects on errors.
+Note that IP 109.123.180.100 is a bot machine, and it is
+heavily loaded by users.
+So
+.Ar max_penalty
+is set to 3 minutes, to prevent the bot to be throttled by server when
+several users do their requests in parallel.
+Otherwise, users may experience delays receiving replies from the bot,
+not to mention the bot could be easily banned as
+.Dq flooder .
 .Sh SEE ALSO
 .Xr sockstat 1 ,
 .Xr tcpdrop 8
-.Rs
-.%T "SEA Sender Protocol Description (in Russian)"
-.%O http://code.google.com/p/blastcore/wiki/SEAProtocol
-.Re
-.Rs
-.%T "Sender And It's History (in Russian)"
-.%O http://thesender.ru/
-.Re
+.Pp
+.Sy "SEA Sender Protocol Description" ,
+.Pa http://code.google.com/p/blastcore/wiki/SEAProtocol
+(in Russian).
+.Pp
+.Sy "Sender And It's History" ,
+.Pa http://thesender.ru/
+(in Russian).
 .Sh HISTORY
 Server is written in 2009 for AVTF TPU Hostel as a replacement for 2006's
 Java server and VC++ 6.0 SEA Sender client by Alexey Fadeev (#Kpot#) and
