@@ -8,8 +8,6 @@
  * Time spent: 46:12 before first run, 29:20 debugging before
  * putting server to full production use, 6 months after start.
  * 
- * $Id$
- *
  * Could be used as an example of using many kqueue() features,
  * see comments in code marked KQ FEATURE.
  *
@@ -54,6 +52,10 @@
 #include <time.h>
 #include <sys/queue.h>
 #include <sys/event.h>
+
+/* Version control: be able to run ident(1) on compiled binary. */
+static char const rcsid[] =
+	"$Id$";
 
 /*** Global vars and constants. ***/
 
@@ -166,6 +168,15 @@ struct flooder {
 	void	*udata;			/* pointer to user */
 };
 
+/* Connection class. */
+struct connclass {
+	in_addr_t	host;	/* IP in machine-unreadable form */
+	in_addr_t	mask;	/* subnet mask */
+	int		login_timeout;	/* slow or fast network? */
+	int		max_conns;	/* max connections from one IP */
+	int		max_penalty;	/* for customizing flood control */
+};
+
 /* Online user properties. */
 struct user_t {
 	LIST_ENTRY(user_t) entries;	/* entry in global user linked list */
@@ -207,6 +218,8 @@ int	alarm_triggered;		/* got timer */
 int	cmdsig_triggered;		/* got admin command */
 /*int	max_sendq;*/			/* how many frames allowed per user output queue */
 int	usercount;			/* number of (fully connected) clients online */
+int	numconnclasses;			/* number of entries in connclasslist array */
+struct connclass *connclasslist;	/* array of connection classes */
 
 /* List of all online and active users. */
 LIST_HEAD(usrlist_t, user_t) userlist = LIST_HEAD_INITIALIZER(userlist);
@@ -214,7 +227,7 @@ LIST_HEAD(usrlist_t, user_t) userlist = LIST_HEAD_INITIALIZER(userlist);
 /* List of banned addresses. */
 SLIST_HEAD(banlist_t, banentry) banlist = SLIST_HEAD_INITIALIZER(banlist);
 
-/* List of banned addresses. */
+/* List of flooding users. */
 STAILQ_HEAD(flooderhead, flooder) flooders = STAILQ_HEAD_INITIALIZER(flooders);
 
 /* Output buffer for archiver. */
@@ -850,6 +863,41 @@ inet4:
 	return (-2);
 }
 
+/*
+ * Parse text string of the form '1.2.3.0/24' to net and mask parts.
+ * Plain IP address without mask '1.2.3.4' is considered '1.2.3.4/32'.
+ * Return 0 if success, and -1 if syntax was incorrect.
+ */
+int
+parse_cidr(char *textaddr, in_addr_t *net, in_addr_t *mask)
+{
+	char *ptr, tmptxt[MAXTXTIPLEN+4];
+	struct in_addr hostnet;
+	int mlen;
+
+	ASSERT((textaddr != NULL) && (net != NULL) && (mask != NULL));
+
+	if (strlen(textaddr) < 7)	/* surely incorrect */
+		return (-1);
+
+	strlcpy(tmptxt, textaddr, sizeof(tmptxt));
+	ptr = strchr(tmptxt, '/');
+	if (!ptr)
+		mlen = 32;
+	else {
+		*ptr++ = '\0';
+		mlen = atoi(ptr);
+		if ((mlen < 0) || (mlen > 32))
+			return (-1);
+	}
+	if (!inet_aton(tmptxt, &hostnet))
+		return (-1);
+	*net = hostnet.s_addr;
+	*mask = htonl(mlen ? (~0 << (32 - mlen)) : 0);
+
+	return (0);
+}
+
 /* 
  * Do a nonblocking connect on passed socket variable with setting
  * user data for keeping in kevent(). This function may be called on timer
@@ -1146,26 +1194,11 @@ ban_address(char *textaddr, in_addr_t ipaddr, int timeout)
 {
 	time_t curtime = time(NULL);
 	struct banentry *curban;
-	char *ptr, tmptxt[MAXTXTIPLEN+4];
-	struct in_addr hostnet;
 	in_addr_t mask = 0xffffffff;	/* /32 by default */
-	int mlen;
 
 	if (textaddr) {
-		strlcpy(tmptxt, textaddr, sizeof(tmptxt));
-		ptr = strchr(tmptxt, '/');
-		if (!ptr)
-			mlen = 32;
-		else {
-			*ptr++ = '\0';
-			mlen = atoi(ptr);
-			if ((mlen < 0) || (mlen > 32))
-				return (-1);
-		}
-		if (!inet_aton(tmptxt, &hostnet))
+		if (parse_cidr(textaddr, &ipaddr, &mask) == -1)
 			return (-1);
-		ipaddr = hostnet.s_addr;
-		mask = htonl(mlen ? (~0 << (32 - mlen)) : 0);
 	}
 
 	if (timeout == 0)
@@ -1998,7 +2031,9 @@ accept_client(void)
 {
 	struct kevent kev[2];
 	struct sockaddr_in cli_addr;
-	struct user_t *user = NULL;
+	struct user_t *user = NULL, *curuser;
+	struct connclass *class = NULL;
+	int i, numconns, login_timeout = LOGIN_TIMEOUT*1000;	/* default for kqueue() */
 	int ret, fd, clilen = sizeof(struct sockaddr_in), yes = 1;
 
 	ASSERT(kev != NULL);
@@ -2017,6 +2052,13 @@ retry:
 		return;
 	}
 
+	syslog(LOG_DEBUG, "received connection from %s:%hu on fd=%d", inet_ntoa(cli_addr.sin_addr),
+			ntohs(cli_addr.sin_port), fd);
+
+	/*
+	 * First check banlist, to not waste resources on other checks
+	 * (scanning userlist) for every potential bot.
+	 */
 	if (check_banlist(NULL, cli_addr.sin_addr.s_addr)) {
 		/*
 		 * SEA SHIT: we can't implement a notification for user about
@@ -2030,6 +2072,36 @@ retry:
 		goto accept_failed;
 	}
 
+	/*
+	 * Now find connection class for this IP, if any.
+	 */
+	for (i = 0; i < numconnclasses; i++)
+		if (connclasslist[i].host == (cli_addr.sin_addr.s_addr & connclasslist[i].mask)) {
+			class = &connclasslist[i];
+			break;
+		}
+
+	/*
+	 * If connection class was found, override default values and check
+	 * if there are too many user already logged in from this IP.
+	 */
+	if (class) {
+		login_timeout = class->login_timeout * 1000;
+
+		/* Scan userlist to count users from this IP. */
+		numconns = 0;
+		LIST_FOREACH(curuser, &userlist, entries)
+			if (!bcmp(&curuser->addr.sin_addr, &cli_addr.sin_addr, sizeof(struct in_addr)))
+				numconns++;
+
+		if (numconns >= class->max_conns) {
+			syslog(LOG_INFO, "too many connections from IP %s, closing connection on fd=%d",
+					inet_ntoa(cli_addr.sin_addr), fd);
+			goto accept_failed;
+		}
+	}
+
+	/* Only now client is allowed to allocate some of our resources. */
 	user = malloc(sizeof(struct user_t));
 	if (user == NULL) {
 		syslog(LOG_ERR, "accept_client: malloc: %m");
@@ -2046,12 +2118,10 @@ retry:
 		syslog(LOG_ERR, "inet_ntop: %m");
 		goto accept_failed;
 	}
-	syslog(LOG_DEBUG, "received connection from %s:%hu on fd=%d", user->txtaddr,
-			ntohs(cli_addr.sin_port), fd);
 
 	/* Init critical vars. */
 	STAILQ_INIT(&user->outbufq);
-	user->max_penalty = DEF_MAXPENALTY;	/* TODO: make this customizable. */
+	user->max_penalty = class ? class->max_penalty : DEF_MAXPENALTY;
 
 	/*
 	 * At this time user struct is initialized to minimum - and
@@ -2079,11 +2149,13 @@ retry:
 	 * it is not critical and something will occur later anyway. This
 	 * is not the best way to do things. though.
 	 */
-	EV_SET(&kev[0], user->fd, EVFILT_TIMER, EV_ADD|EV_ONESHOT, 0, LOGIN_TIMEOUT*1000, user);
+	EV_SET(&kev[0], user->fd, EVFILT_TIMER, EV_ADD|EV_ONESHOT, 0, login_timeout, user);
 	if ((kevent(kq, kev, 1, NULL, 0, NULL) < 0))
 		syslog(LOG_INFO, "accept_client: adding login timer kevent: %m");
 
-	/* We don't care about writing to client before his first cmd. */
+	/*
+	 * We don't care about writing to client before his first cmd.
+	 */
 
 	/* Finished accepting. */
 	return;
@@ -2547,7 +2619,7 @@ main(int argc, char *argv[])
 	int ch, i, quiet = 0;
 	uint16_t port = SEA_PORT;
 	struct sockaddr_in serv_addr;
-	char *proctitle;
+	char *proctitle, *ptr;
 
 	/* Default values for some vars. */
 	flood_threshold = DEF_FKILLTHRESH;
@@ -2600,7 +2672,44 @@ main(int argc, char *argv[])
 	argc -= optind;
 	argv += optind;
 
-	/* XXX check non-opt arguments here in the future */
+	/*
+	 * Parse and fill connection classes, if present.
+	 */
+	if (argc > 0) {
+		connclasslist = calloc(argc, sizeof(struct connclass));
+		if (connclasslist == NULL) {
+			fprintf(stderr, "Error allocating memory for connection classes list\n");
+			exit(EX_OSERR);
+		}
+	}
+	numconnclasses = argc;
+
+#define INVALSPEC do {							  \
+	ptr--; *ptr = ':';	/* restore argv[i] for printing */	  \
+	fprintf(stderr, "Invalid connclass specification %s\n", argv[i]); \
+	exit(EX_DATAERR);						  \
+} while (0);
+
+	for (i = 0; i < argc; i++) {
+		ptr = strchr(argv[i], ':');
+		if (!ptr)
+			INVALSPEC;
+		*ptr = '\0';
+		ptr++;
+		if (parse_cidr(argv[i], &connclasslist[i].host, &connclasslist[i].mask))
+			INVALSPEC;
+		if (sscanf(ptr, "%d:%d:%d", &connclasslist[i].login_timeout,
+				&connclasslist[i].max_conns, &connclasslist[i].max_penalty) != 3)
+			INVALSPEC;
+		if (connclasslist[i].login_timeout < 1)
+			connclasslist[i].login_timeout = 1;
+		if (connclasslist[i].login_timeout > 86400)	/* even this too high */
+			connclasslist[i].login_timeout = 86400;
+		if (connclasslist[i].max_conns < 1)
+			connclasslist[i].max_conns = 1;
+		if (connclasslist[i].max_penalty < DEF_MAXPENALTY)
+			connclasslist[i].max_penalty = DEF_MAXPENALTY;
+	}
 
 	/* Write all errors via syslog - it can handle stderr on startup too. */
 	openlog(SYSLOG_IDENT, debug ? LOG_PERROR : LOG_NDELAY, LOG_USER);
