@@ -23,7 +23,7 @@
 .\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd October 15, 201
+.Dd October 20, 2010
 .Dt SEASRVKQD 8
 .Sh NAME
 .Nm seasrvkqd
@@ -38,6 +38,7 @@
 .Op Fl f Ar number
 .Op Fl t Ar seconds
 .Op Fl k Ar addr Ns Op Ns / Ns Ar mask
+.Op Fl b Ar pattern
 .Bk
 .Op Ar connclass ...
 .Ek
@@ -116,6 +117,40 @@ May be specified several times.
 This option is used to pre-populate ban list, instead of setting
 .Fl t
 to big value and manually adding addresses via control symlink after start.
+.It Fl b Ar pattern
+Blacklist a pattern, to be matched in user/computer names.
+May be specified several times.
+A pattern is a standard
+.Xr glob 3
+shell pattern with metacharacters
+.Dq "*?[]" ,
+implemented via
+.Xr fnmatch 3 .
+Pattern matching is case-insensitive, but this depends on the current
+locale of server's process.
+.Pp
+If name matches a pattern, address is banned for a current ban timeout
+.Ns ( Fl t ) .
+Patterns in blacklist apply to all addresses and are persistent, though
+they can be added or deleted via control symlink.
+.Pp
+Pattern matching occurs when user logs in or changes name, after names were
+sanitized: all control chars (ASCII less than 32) were changed to underscores
+.Ns ( Sq "_" )
+and angle brackets
+.Po
+.Sq "<"
+and
+.Sq ">"
+.Pc
+were changed to parentheses
+.Sq \&(
+and
+.Sq \&) .
+This, however, happens before server unconditionally changes user name
+beginning from space (ASCII 32) to underscore (names beginning from
+space break userlist sorting in some clients), so that admin may kill
+such users if he wish so.
 .El
 .Pp
 After options follows zero or more
@@ -321,12 +356,20 @@ Currently supported signals are:
 .Bl -tag -width "SIGWINCH"
 .It SIGUSR1
 Kill and ban user(s) with specified ID, address or address:port
-of it's conection.
+of it's conection, or matching blacklist pattern or subnet/mask.
 Address is always banned for usual timeout,
 regardless of whether users from it are currently connected.
+Actually, it works the following way:
+.Em first
+the argument (address, subnet, pattern) is added to banlist or
+patterns blacklist, and
+.Em then
+the entire user list is scanned, checking all users against
+new banlist/blacklist, killed if they match.
 .It SIGUSR2
 Set ban timeout to specified number of seconds
 .Ns ( Fl t ) ,
+unblacklist pattern,
 unban address (or address/mask) or set archiver URL for responses
 to clients
 .Ns ( Fl u ) .
@@ -335,6 +378,12 @@ If keyword is
 cycle to next debug
 .Ns ( Fl d )
 level (0 repeats after 2).
+If that is neither number nor address (address/mask), then server checks
+if it begins from lower-case substring
+.Dq "http://"
+(someone may say this is a special case of keyword).
+If so, this is an URL for archiver. If not, the exact string is searched
+in the patterns blacklist, and removed from there if found.
 .It SIGHUP
 Set archiver socket path/address to specified ipaddr:port or Unix
 domain socket path. Same as
@@ -369,7 +418,7 @@ lb lb lb lb lb lb lb
 lb l l l l l l.
 \&	Number	IP Addr	ip:port	Net/mask	Keywords	Any string
 SIGUSR1	ban one	ban all	ban all	ban all	-	-
-SIGUSR2	timeout	unban	unban	unban	'debug'	set URL
+SIGUSR2	timeout	unban	unban	unban	debug*	URL/unban*
 SIGHUP	-	-	archiver*	-	-	archiver*
 SIGINFO	dump one	dump all	dump one	-	all,bans	-
 SIGWINCH	-	alt srv	-	-	-	-
@@ -398,6 +447,19 @@ append everything to file:
 .Pp
 .Dl seasrvkqd_flags="-a 3 3>&1 | daemon sh -c \e"cat >> /tmp/sea.txt\e""
 .Pp
+The following is an example of banning one IP address and one subnet forever
+(though they can be unbanned later via control symlink) and adding two patterns
+to blacklist of disallowed names.
+Note that second pattern actually searches for two substring in names,
+.Dq apple
+and
+.Dq app1e
+(a hacker-style
+.Dq l33t
+spelling):
+.Pp
+.Dl "seasrvkqd -k 1.2.3.4 -k 2.3.4.0/24 -b '*fuck*' -b '*app[l1]e*'"
+.Pp
 The following is the more complicated example of daemon usage:
 .Pp
 .Dl "seasrvkqd -t 600 109.123.180.100:7:3:180 109.123.180.0/23:7:3:10"
@@ -421,6 +483,8 @@ not to mention the bot could be easily banned as
 .Dq flooder .
 .Sh SEE ALSO
 .Xr sockstat 1 ,
+.Xr fnmatch 3 ,
+.Xr glob 3 ,
 .Xr tcpdrop 8
 .Pp
 .Sy "SEA Sender Protocol Description" ,
@@ -439,3 +503,7 @@ Sergey Khilkov (J7).
 .Sh BUGS
 The overall system is ugly and not recommended to use.
 See protocol description and history for overview of architectural flaws.
+.Pp
+Matching of patterns is case-insensitive, but that depends on system library
+functions and current locale - and Windows clients typically use different
+locale than Unix machines (you may need to tweak daemon process' environment).

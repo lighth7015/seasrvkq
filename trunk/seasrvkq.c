@@ -52,6 +52,7 @@
 #include <time.h>
 #include <sys/queue.h>
 #include <sys/event.h>
+#include <fnmatch.h>
 
 /* Version control: be able to run ident(1) on compiled binary. */
 static char const rcsid[] =
@@ -160,6 +161,12 @@ struct banentry {
 	char txtaddr[MAXTXTIPLEN+4];	/* IP/mask in human-readable form */
 };
 
+/* Element of blacklisted patterns list. */
+struct blpentry {
+	SLIST_ENTRY(blpentry) entries;	/* linked list */
+	char pattern[MAXPATHLEN+1];	/* forbidden nick/comp pattern */
+};
+
 /* Element of flood control queue. */
 struct flooder {
 	STAILQ_ENTRY(flooder) entries;	/* linked list */
@@ -226,6 +233,9 @@ LIST_HEAD(usrlist_t, user_t) userlist = LIST_HEAD_INITIALIZER(userlist);
 
 /* List of banned addresses. */
 SLIST_HEAD(banlist_t, banentry) banlist = SLIST_HEAD_INITIALIZER(banlist);
+
+/* List of blacklisted patterns. */
+SLIST_HEAD(blplist_t, blpentry) blplist = SLIST_HEAD_INITIALIZER(blplist);
 
 /* List of flooding users. */
 STAILQ_HEAD(flooderhead, flooder) flooders = STAILQ_HEAD_INITIALIZER(flooders);
@@ -1239,6 +1249,55 @@ ban_address(char *textaddr, in_addr_t ipaddr, int timeout)
 }
 
 /*
+ * Check passed string against patterns black list.
+ */
+struct blpentry *
+check_patterns(char *string)
+{
+	struct blpentry *curpat;
+
+	ASSERT(string != NULL);
+
+	SLIST_FOREACH(curpat, &blplist, entries) {
+		if (!fnmatch(curpat->pattern, string, FNM_CASEFOLD))
+			return (curpat);
+	}
+
+	return (NULL);
+}
+
+/*
+ * Add a pattern to list of blacklisted patterns.
+ *
+ * The only possible reason of returning -1 (instead of 0 on success)
+ * is ENOMEM.
+ */
+int
+blacklist_pattern(char *newpat)
+{
+	struct blpentry *curpat;
+
+	ASSERT(newpat != NULL);
+
+	/* Check if such pattern already present. */
+	SLIST_FOREACH(curpat, &blplist, entries) {
+		if (!strncmp(curpat->pattern, newpat, sizeof(curpat->pattern)))
+			return (0);
+	}
+
+	curpat = malloc(sizeof (struct blpentry));
+	if (curpat == NULL) {
+		syslog(LOG_ERR, "can't allocate memory for pattern: %m");
+		return (-1);
+	}
+	bzero(curpat, sizeof(struct blpentry));
+	SLIST_INSERT_HEAD(&blplist, curpat, entries);
+	strlcpy(curpat->pattern, newpat, sizeof(curpat->pattern));
+
+	return (0);
+}
+
+/*
  * Handle signal from admin.
  *
  * So, we are doing control for daemon implementing tricky, illogical and
@@ -1266,6 +1325,7 @@ admin_command(int signo)
 	/* time_t curtime = time(NULL); */
 	struct user_t *curuser, *tmpuser;
 	struct banentry *ban;
+	struct blpentry *curpat, *tmppat;
 	struct sockaddr_storage addr_stor;
 	struct sockaddr_in *addr_in = (struct sockaddr_in*)&addr_stor;
 
@@ -1287,24 +1347,28 @@ admin_command(int signo)
 	case SIGUSR1:	/* kill a user and ban it for standard flood ban time */
 		/*
 		 * We can ban user by ID, by IP, by address:port of it's
-		 * connection, and finally, ban a subnet, killing all matching
-		 * users. In the latter case, we do so by banning subnet and
-		 * then checking each user against banlust. We try to keep only
+		 * connection, and finally, ban a subnet/pattern, killing all
+		 * matching users. In the latter case, we do so by banning
+		 * subnet or blacklisting pattern and then checking each user
+		 * against banlist/pattern blacklist. We try to keep only
 		 * one entry in banlist.
 		 */
 		if ((strchr(admcmd, '/')) || (ipaddr != INADDR_NONE))
 			ban_address(admcmd, INADDR_NONE, ban_timeout);
 		else if (fd == -2)
 			ban_address(NULL, addr_in->sin_addr.s_addr, ban_timeout);
+		else if (fd == 0)
+			blacklist_pattern(admcmd);
 		LIST_FOREACH_SAFE(curuser, &userlist, entries, tmpuser)
 			if (((fd > 0) && (fd == curuser->fd)) ||
 			    ((ipaddr != INADDR_NONE) && !strcmp(admcmd, curuser->txtaddr)) ||
 			    ((fd == -2) && !bcmp(&curuser->addr, addr_in, addr_in->sin_len)) ||
+			    ((fd == 0) && (check_patterns(curuser->username) || check_patterns(curuser->compname))) ||
 			    check_banlist(curuser->txtaddr, INADDR_NONE)) {
 				syslog(LOG_WARNING, "client id=%d %s[%s] killed by admin",
 						curuser->fd, curuser->username, curuser->compname);
-				/* If it was user id, we must ban here. */
-				if (fd > 0)
+				/* If it was user id or pattern, we must ban here. */
+				if (fd >= 0)
 					ban_address(curuser->txtaddr, INADDR_NONE, ban_timeout);
 				kill_user(curuser, 0, "killed by admin");
 			}
@@ -1320,10 +1384,16 @@ admin_command(int signo)
 			debug = (debug + 1) % 3;
 			syslog(LOG_INFO, "setting debug level to %d", debug);
 			setlogmask(LOG_UPTO(debug > 0 ? LOG_DEBUG : LOG_INFO));
-		} else {
+		} else if (!bcmp(admcmd, "http://", 7)) {
 			strlcpy(archlink, admcmd, sizeof(archlink));
 			syslog(LOG_NOTICE, "setting archive URL to: %s", admcmd);
-		}
+		} else
+			SLIST_FOREACH_SAFE(curpat, &blplist, entries, tmppat)
+				if (!strcmp(admcmd, curpat->pattern)) {
+					SLIST_REMOVE(&blplist, curpat, blpentry, entries);
+					syslog(LOG_NOTICE, "unblacklisted pattern %s", admcmd);
+					free(curpat);
+				}
 		break;
 	case SIGHUP:
 		if (fd >= 0) {
@@ -1446,6 +1516,9 @@ escape_name(unsigned char *name, int len)
 
 /*
  * Process login command - username and computer name.
+ *
+ * Returns 0 on success, -1 on protocol error and -2 if username or compname
+ * match patterns prohibited by admin.
  */
 int
 process_usercomp(struct user_t *user)
@@ -1455,6 +1528,7 @@ process_usercomp(struct user_t *user)
 	struct dbuf *uinfobuf;
 	char buf[576];
 	struct kevent kev;
+	struct blpentry *pat;
 
 	ASSERT(user != NULL);
 
@@ -1503,10 +1577,22 @@ process_usercomp(struct user_t *user)
 	 * it to underscore, the same with other control chars, and replace
 	 * HTML angle braces, too (which will also slightly simplify archiver).
 	 */
-	if (user->username[0] == 32)
-		user->username[0] = '_';
 	escape_name(user->username, user->unamelen);
 	escape_name(user->compname, user->cnamelen);
+
+	/*
+	 * Falling out of prohibited patterns could also be viewed as
+	 * "name validity". Also give admin a chance to catch user with
+	 * name beginnig from space before we'll change it.
+	 */
+	if ((pat = check_patterns(user->username)) || (pat = check_patterns(user->compname))) {
+		syslog(LOG_INFO, "client id=%d from %s:%hu tried to log in as %s[%s] but matched blacklisted pattern %s",
+				user->fd, user->txtaddr, ntohs(user->addr.sin_port),
+				user->username, user->compname, pat->pattern);
+		return (-2);
+	}
+	if (user->username[0] == 32)
+		user->username[0] = '_';
 
 	/*
 	 * Now we must hook the user into user list and inform other users
@@ -1591,6 +1677,9 @@ invalid_format:
 
 /*
  * Process fully available SEA protocol command from client.
+ *
+ * Returns 0 on success, -1 on protocol error and -2 if username or compname
+ * match patterns prohibited by admin.
  */	
 int
 process_command(struct user_t *user)
@@ -1601,6 +1690,7 @@ process_command(struct user_t *user)
 	uint8_t buf102msghdr[8];	/* message header for proto version >= 102 */
 	uint32_t bigmsglen;		/* to place to hdr for proto version >= 102 */
 	struct dbuf *bcastbuf, *bigbuf;
+	struct blpentry *pat;
 
 	ASSERT(user != NULL);
 	dsyslog(LOG_DEBUG, "process_command: debug fd=%d: entering with cmd #%d and cmdlen=%d",
@@ -1976,6 +2066,11 @@ process_command(struct user_t *user)
 		memcpy(user->username, &user->inbuf[1], user->unamelen);
 		/* SEA SHIT: see long comment in process_usercomp(). */
 		escape_name(user->username, user->unamelen);
+		if ((pat = check_patterns(user->username))) {
+			syslog(LOG_INFO, "client id=%d %s[%s] tried to change name to %s but matched blacklisted pattern %s",
+					user->fd, buf, user->compname, user->username, pat->pattern);
+			return (-2);
+		}
 		if (user->username[0] == 32)
 			user->username[0] = '_';
 		syslog(LOG_INFO, "client id=%d %s[%s] changes name to %s",
@@ -2310,7 +2405,7 @@ read_done:
 		user->inbuf = NULL;
 	}
 	if (ret) {
-		kill_user(user, 0, "SEA protocol violation");
+		kill_user(user, 0, (ret == -1) ? "SEA protocol violation" : "matched blacklisted pattern");
 		return;
 	}
 
@@ -2588,7 +2683,7 @@ void
 usage(char *proctitle, char full)
 {
 	fprintf(stderr,
-		"Usage: %s [-dqs] [-p port] [-c path] [-a addrspec] [-u URL] [-f num] [-t sec] [-k addr]\n\n",
+		"Usage: %s [-dqs] [-p port] [-c path] [-a addrspec] [-u URL] [-f num] [-t sec] [-k addr] [-b pattern] [connclass ...]\n\n",
 		proctitle);
 	fprintf(stderr, (full == 'h') ?
 		"This is a server daemon for a custom SEA Sender protocol, see comments at the\n"
@@ -2602,6 +2697,7 @@ usage(char *proctitle, char full)
 		"  -u\tURL of archiver web page to answer to clients\n"
 		"  -p\tPort to listen on, instead of default 8732\n"
 		"  -k\tKill (ban) specified address[/mask] till year 2038\n"
+		"  -b\tBlacklist pattern in user or comp name"
 		"  -f\tFlood threshold coefficient determinig when client will be killed\n"
 		"  -t\tTimeout for temporary bans (both manual and auto) of IP addresses\n\n"
 		"For details about signals, flood control, etc. see manual page.\n"
@@ -2627,7 +2723,7 @@ main(int argc, char *argv[])
 
 	proctitle = argv[0];
 	/* Parse command line options. */
-	while ((ch = getopt(argc, argv, "a:c:df:k:p:qstu:h")) != -1) {
+	while ((ch = getopt(argc, argv, "a:c:df:k:b:p:qstu:h")) != -1) {
 		switch (ch) {
 		case 'd':
 			debug += 1;
@@ -2647,6 +2743,10 @@ main(int argc, char *argv[])
 		case 'k':
 			if (ban_address(optarg, INADDR_NONE, 0x7ffffffe - time(NULL)) == -1)
 				fprintf(stderr, "Invalid kill/ban %s, ignoring.\n", optarg);
+			break;
+		case 'b':
+			if (blacklist_pattern(optarg))
+				fprintf(stderr, "Not enough memory for pattern %s, skipping.\n", optarg);
 			break;
 		case 'f':
 			flood_threshold = atoi(optarg) < 3 ? 3 : atoi(optarg);

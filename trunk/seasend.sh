@@ -3,13 +3,15 @@
 # A script to send message to SEA Sender from FreeBSD command line.
 # (c) Vadim Goncharov <vadim_nuclight@mail.ru>, 2010.
 #
-# Covered by BSD license.   
+# Covered by BSD license.
+#
+# $Id$
 
 # default values
 id=0
 user=`whoami`
 comp=`hostname -s`
-server=kernblitz.nuclight.avtf.net
+server=hostel.avtf.net
 pflags=0
 
 # be somewhat cross-platform...
